@@ -80,7 +80,7 @@ class SFTData(Dataset):
                             history_items.append(f"{i}. In {r}, I chose {a}")
                         history_str = "\n".join(history_items)
                     
-                    prompt = f"""You are an expert at text adventure games. Analyze this game state and generate a training example:
+                    prompt = f"""You are playing a text adventure game. Analyze this game state and give a response formatted as requested:
 
 Game State:
 Goal: {agent.goal if agent.goal else "Unknown"}
