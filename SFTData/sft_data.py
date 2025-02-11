@@ -92,7 +92,7 @@ Currently available actions: {filtered_actions}
 
 Generate a *concise* response in the following format:
 
-A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve
+A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve. Remember that you might need to explore different rooms to achieve your goal.
 
 B) Then, state your chosen action - Make sure it is in the available actions list:
 Therefore, I choose: [exact action]
@@ -223,9 +223,7 @@ Your response:"""
         return stats
 
     def filter_valid_actions(self, valid_actions, step_count):
-        """Strategically filter 'look' and 'inventory' actions"""
-        print(f"\nDEBUG - Before filtering: {valid_actions}")
-        
+        """Strategically filter 'look' and 'inventory' actions"""        
         # Keep all actions except look/inventory
         filtered_actions = [action for action in valid_actions 
                            if action not in ['look', 'inventory']]
@@ -234,9 +232,7 @@ Your response:"""
         for action in valid_actions:
             if action in ['look', 'inventory']:
                 prob = max(0.1, 1.0 - (step_count * 0.2))
-                print(f"DEBUG - Info action: {action}, probability: {prob}")
                 if random.random() < prob:
                     filtered_actions.append(action)
         
-        print(f"DEBUG - After filtering: {filtered_actions}")
         return filtered_actions if filtered_actions else valid_actions
