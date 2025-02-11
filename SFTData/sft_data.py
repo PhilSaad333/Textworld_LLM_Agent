@@ -27,7 +27,7 @@ class SFTData(Dataset):
         # Create data directory if it doesn't exist
         os.makedirs(self.data_dir, exist_ok=True)
         
-    def generate_training_examples(self, client, agent, env_manager, num_games=100, max_difficulty=10) -> List[Dict[str, str]]:
+    def generate_training_examples(self, client, agent, env_manager, num_games=100, min_difficulty=1, max_difficulty=10) -> List[Dict[str, str]]:
         """Generate training examples using GPT-4
         
         Args:
@@ -35,61 +35,70 @@ class SFTData(Dataset):
             agent: TextWorld agent instance
             env_manager: TextWorld environment manager
             num_games: Total number of games to generate examples from
+            min_difficulty: Minimum difficulty level to use
             max_difficulty: Maximum difficulty level to use
             
         Returns:
             List of training examples
         """
-        print(f"Generating {num_games} training examples across {max_difficulty} difficulty levels...")
+        difficulty_range = max_difficulty - min_difficulty + 1
+        games_per_difficulty = max(1, num_games // difficulty_range)
+        
+        print(f"Generating ~{num_games} training examples across difficulties {min_difficulty}-{max_difficulty}")
+        print(f"(Approximately {games_per_difficulty} games per difficulty level)")
         
         training_data = []
         
-        for difficulty in range(1, max_difficulty + 1):
-            for game_num in range(num_games // max_difficulty):
+        for difficulty in range(min_difficulty, max_difficulty + 1):
+            for game_num in range(games_per_difficulty):
                 print(f"\nGenerating game {game_num + 1} at difficulty {difficulty}")
                 
                 # Create new game and reset agent state
                 env = env_manager.get_or_create_env(difficulty)
+                if env is None:
+                    print(f"Warning: Could not create environment for difficulty {difficulty}")
+                    continue
+                    
                 obs, info = env.reset()
                 agent.reset()  # Reset agent state including step count
                 done = False
                 
                 # Parse goal and clean first observation
-                print("\nDEBUG - Before parse_goal:")
-                print(f"DEBUG - Agent goal: {agent.goal}")
                 agent.parse_goal(obs)
-                print(f"DEBUG - After parse_goal:")
-                print(f"DEBUG - Agent goal: {agent.goal}")
-                clean_obs = agent._clean_first_observation(agent._clean_observation(obs))
-                print(f"DEBUG - Cleaned observation: {clean_obs[:200]}...")
+                clean_obs = agent._clean_observation(obs)
                 
                 while not done:
                     valid_actions = info['admissible_commands']
                     filtered_actions = self.filter_valid_actions(valid_actions, agent.true_state['step_count'])
                     room = agent._get_room_name(obs)
                     
-                    # Only clean subsequent observations normally
-                    if agent.true_state['step_count'] > 0:
-                        clean_obs = agent._clean_observation(obs)
-                        print(f"DEBUG: New Cleaned Observation: {clean_obs}")
+                    # Format action history
+                    history_str = "None"
+                    if agent.action_room_history:
+                        history_items = []
+                        for i, (r, a) in enumerate(agent.action_room_history[-5:], 1):  # Show last 5 actions
+                            history_items.append(f"{i}. In {r}, I chose {a}")
+                        history_str = "\n".join(history_items)
                     
                     prompt = f"""You are an expert at text adventure games. Analyze this game state and generate a training example:
 
 Game State:
-Goal: Take the latchkey from the floor. You may have to explore other rooms to find it.
+Goal: {agent.goal if agent.goal else "Unknown"}
 Location: {room}
 Observation: {clean_obs}
-Previous action history: (Hidden - you don't know your previous actions)
+Previous actions:
+{history_str}
 Currently available actions: {filtered_actions}
 
-Generate a *concise* response that analyzes each available action and makes the optimal choice:
+Generate a *concise* response in the following format:
 
-A) First, analyze each possible action:
-[Action Number]) [Action]
-[Analysis of what this action would do]
+A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve
 
 B) Then, state your chosen action - Make sure it is in the available actions list:
 Therefore, I choose: [exact action]
+
+C) Then, state your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
+I predict that I will be in room: [room name]
 
 Your response:"""
 
@@ -108,11 +117,13 @@ Your response:"""
                         # Use filtered_actions for validation
                         action = self.extract_action(response, filtered_actions)
                         if action:
+                            # Update action history before taking the step
+                            agent.action_room_history.append((room, action))
+                            
                             obs, reward, done, info = env.step(action)
-                            # Update agent's step count
+                            # Update agent's step count and clean the observation
                             agent.true_state['step_count'] += 1
-                            print(f'DEBUG: Step taken: {action}')
-                            print(f"DEBUG: New True Observation: {obs}")
+                            clean_obs = agent._clean_observation(obs)
                         else:
                             print(f"Warning: Could not extract valid action from response")
                             break
@@ -212,19 +223,16 @@ Your response:"""
         return stats
 
     def filter_valid_actions(self, valid_actions, step_count):
-        """Strategically filter valid actions to encourage diversity"""
+        """Strategically filter 'look' and 'inventory' actions"""
         print(f"\nDEBUG - Before filtering: {valid_actions}")
         
-        ALWAYS_AVAILABLE = ['go north', 'go south', 'go east', 'go west', 'take', 'open', 'unlock']
-        INFO_ACTIONS = ['look', 'inventory', 'examine']
-        
-        # Keep all navigation/interaction actions
+        # Keep all actions except look/inventory
         filtered_actions = [action for action in valid_actions 
-                           if any(action.startswith(act) for act in ALWAYS_AVAILABLE)]
+                           if action not in ['look', 'inventory']]
         
-        # Randomly include info actions with decreasing probability
+        # Probabilistically include look/inventory with decreasing probability
         for action in valid_actions:
-            if any(action.startswith(act) for act in INFO_ACTIONS):
+            if action in ['look', 'inventory']:
                 prob = max(0.1, 1.0 - (step_count * 0.2))
                 print(f"DEBUG - Info action: {action}, probability: {prob}")
                 if random.random() < prob:

@@ -11,14 +11,11 @@ from math import floor
 from textworld import EnvInfos
 
 @dataclass
-class CoinCollectorConfig:
-    mode: str = "easy"  # easy/medium/hard
+class TaskConfig:
     max_steps: int = 100
-    game_size: int = 10
     request_infos: EnvInfos = None
     grammar_flags: dict = None
-    room_scale: int = 1          # Controls rate of increase for world size.
-    object_scale: int = 1        # Controls rate of increase for object count.
+    scale: int = 10    # With higher scale, complexity increases less frequently.
     
     def __post_init__(self):
         if self.request_infos is None:
@@ -33,20 +30,19 @@ class CoinCollectorConfig:
             )
         if self.grammar_flags is None:
             # Use a more verbose quest objective by default.
-            # Setting "only_last_action": False instructs the grammar to output the full chain.
             self.grammar_flags = {"only_last_action": False}
 
 
-class CoinCollectorEnvManager:
-    def __init__(self, config: CoinCollectorConfig):
+class TaskEnvManager:
+    def __init__(self, config: TaskConfig):
         self.config = config
-        self.envs: Dict[int, Any] = {}  # level -> env mapping
-        self.games_collection: Dict[int, str] = {}  # level -> game_file mapping
+        self.envs: Dict[int, Any] = {}    # difficulty -> env mapping
+        self.games_collection: Dict[int, str] = {}  # difficulty -> game_file mapping
         
         # Initialize random number generators.
         self.seed(1234)
         
-        # Basic vocabulary for coin collector.
+        # Basic vocabulary for our games.
         self.vocab = [
             "go", "north", "south", "east", "west",
             "take", "drop", "inventory", "look",
@@ -78,12 +74,13 @@ class CoinCollectorEnvManager:
         return rngs
     
     def _make_game(self, level: int, rngs: dict) -> str:
-        """Create a new game file for the given level."""
-        # Create game directory if it doesn't exist.
-        os.makedirs("gen_games", exist_ok=True)
+        """Create a new game file for the given difficulty level."""
+        # Compute effective difficulty based on scale.
+        # For example, with scale=5, levels 1-5 all have effective_diff = 1.
+        effective_diff = ((level - 1) // self.config.scale) + 1
         
-        # Generate a unique game name using level and configuration settings.
-        game_name = f"twcc_{self.config.mode}_level{level}_size{self.config.game_size}_step{self.config.max_steps}"
+        # Generate a unique game name incorporating both level and scale.
+        game_name = f"twcc_level{level}_scale{self.config.scale}_step{self.config.max_steps}"
         game_file = os.path.join("gen_games", f"{game_name}.ulx")
         
         try:
@@ -91,40 +88,54 @@ class CoinCollectorEnvManager:
             if os.path.exists(game_file):
                 os.remove(game_file)
             
-            # Gradually scale world parameters.
-            world_size = min(floor(level / self.config.room_scale) + 2, 15)
-            nb_objects = min(floor(level / self.config.object_scale) + 1, 10)
+            # Gradually scale world parameters using effective difficulty.
+            world_size = min(effective_diff + 2, 15)
+            nb_objects = min(effective_diff + 1, 10)
             
-            # Create a world. Rooms and objects scale with difficulty (but are capped).
+            # Create a world. Rooms and objects scale with effective difficulty (but are capped).
             world = textworld.generator.make_world(
                 world_size=world_size,
                 nb_objects=nb_objects,
                 rngs=rngs
             )
             
-            # Set quest options based on the level.
+            # Set quest options dynamically using effective difficulty.
             quest_options = textworld.GameOptions()
-            if level < 3:
-                # For lower difficulties, use dynamic constraints.
+            if effective_diff < 3:
                 quest_options.chaining.min_length = 1
-                quest_options.chaining.max_length = level + 1
+                quest_options.chaining.max_length = effective_diff + 1
                 quest_options.chaining.min_breadth = 1
                 quest_options.chaining.max_breadth = 2
                 quest_options.chaining.min_depth = 1
                 quest_options.chaining.max_depth = 2
-            elif level <= 10:
-                # For moderate difficulties, use fixed moderate constraints.
-                quest_options.chaining.min_length = 3
-                quest_options.chaining.max_length = 6
-                quest_options.chaining.min_breadth = 1
-                quest_options.chaining.max_breadth = 2
-                quest_options.chaining.min_depth = 1
-                quest_options.chaining.max_depth = 2
+            elif effective_diff <= 10:
+                # Determine available resources
+                available_objects = nb_objects       # equals min(effective_diff + 1, 10)
+                available_rooms = world_size           # equals min(effective_diff + 2, 15)
+                if available_objects < 6:
+                    # With too few objects, use a simpler quest structure.
+                    quest_options.chaining.min_length = 1
+                    quest_options.chaining.max_length = available_objects
+                    quest_options.chaining.min_breadth = 1
+                    quest_options.chaining.max_breadth = 1
+                    quest_options.chaining.min_depth = 1
+                    quest_options.chaining.max_depth = 1
+                else:
+                    quest_options.chaining.min_length = 3
+                    quest_options.chaining.max_length = min(6, available_objects)
+                    if available_rooms < 7:
+                        quest_options.chaining.min_breadth = 1
+                        quest_options.chaining.max_breadth = 1
+                        quest_options.chaining.min_depth = 1
+                        quest_options.chaining.max_depth = 1
+                    else:
+                        quest_options.chaining.min_breadth = 1
+                        quest_options.chaining.max_breadth = 2
+                        quest_options.chaining.min_depth = 1
+                        quest_options.chaining.max_depth = 2
             else:
-                # For higher difficulty levels, force more complex quest chains.
-                # Increase the minimum chain length, require more branching, and a deeper chain.
                 quest_options.chaining.min_length = 4
-                quest_options.chaining.max_length = min(6 + ((level - 10) // 5), 10)
+                quest_options.chaining.max_length = min(6 + ((effective_diff - 10) // 5), 10)
                 quest_options.chaining.min_breadth = 2
                 quest_options.chaining.max_breadth = 3
                 quest_options.chaining.min_depth = 2
@@ -148,14 +159,14 @@ class CoinCollectorEnvManager:
             grammar_options = {"theme": "house", **self.config.grammar_flags}
             grammar = textworld.generator.make_grammar(grammar_options)
             
-            # Create the game using make_game_with (which accepts the world, a list of quests, and grammar).
+            # Create the game using make_game_with which accepts the world, quests, and grammar.
             game = textworld.generator.make_game_with(
                 world=world,
                 quests=[quest],
                 grammar=grammar
             )
             
-            # Compile and save the game. Use a GameOptions object with the output path.
+            # Compile and save the game.
             comp_options = textworld.GameOptions()
             comp_options.path = game_file
             game_file = textworld.generator.compile_game(game, comp_options)
@@ -166,7 +177,7 @@ class CoinCollectorEnvManager:
             return None
     
     def get_or_create_env(self, level: int) -> Optional[gym.Env]:
-        """Get an existing environment or create a new one for the given level."""
+        """Get an existing environment or create a new one for the given difficulty level."""
         if level not in self.envs:
             rngs = self._get_seeds_for_level(level)
             game_file = self._make_game(level, rngs)

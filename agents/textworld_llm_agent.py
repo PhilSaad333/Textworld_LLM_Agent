@@ -65,90 +65,42 @@ class TextWorldLLMAgent:
 
     def parse_goal(self, initial_obs):
         """Extract goal from initial observation"""
-        print("\nDEBUG - parse_goal called")
-        print(f"DEBUG - Initial observation: {initial_obs[:200]}...")  # First 200 chars to keep output readable
-        
         # Split into lines and clean
         lines = [line.strip() for line in initial_obs.split('\n') 
                 if line.strip() and sum(c in r'\_|/$[]{}=+-' for c in line) <= len(line) * 0.1]
         
-        print(f"DEBUG - Cleaned lines: {lines[:3]}...")  # First few lines
-        
         if not lines:
-            print("WARNING - Could not find any valid lines in observation")
             return "Unknown"
         
-        # Find the line containing the goal
+        # Get the first non-ASCII line as the raw goal line
         goal_line = None
-        goal_markers = [
-            "Your task",
-            "First stop",
-            "First thing",
-            "First off",
-            "First of all",
-            "First step",
-            "Your first objective",
-            "Here is how to play",
-            "Here is your task",
-            "there is something I need you to do",
-            "Who's got a virtual machine",
-            "Welcome to"
-        ]
-        
-        # Try to find the goal line
         for line in lines:
-            # Check for any goal marker
-            if any(marker.lower() in line.lower() for marker in goal_markers):
-                goal_line = line
+            if line.strip():
+                goal_line = line.strip()
                 self.raw_goal_line = line
-                print(f"DEBUG - Found goal line with marker: {line}")
                 break
-                
-        # If no goal line found with markers, look for the pattern that often appears in these games
-        if not goal_line:
-            for line in lines:
-                if ("TextWorld" in line and 
-                    any(x in line.lower() for x in ["playing", "entered", "welcome", "ready"])):
-                    goal_line = line
-                    self.raw_goal_line = line
-                    print(f"DEBUG - Found goal line with TextWorld pattern: {line}")
-                    break
         
         if not goal_line:
-            print("WARNING - Could not find goal line")
-            return lines[0]
+            return "Unknown"
         
-        self.raw_goal_line = goal_line
-            
-        # Remove intro text with more conservative patterns
-        intro_patterns = [
-            # Remove standard TextWorld intros but preserve the actual task description
-            r"^.*?TextWorld!\s*",
-            r"^Get ready to pick stuff up and put it in places, because you've just entered TextWorld!\s*",
-            r"^Hey, thanks for coming over to the TextWorld today, there is something I need you to do for me\.\s*",
-            r"^I hope you're ready to go into rooms and interact with objects, because you've just entered TextWorld!\s*",
-            r"^Welcome to (?:another )?(?:profound|exciting|fast paced|life changing) (?:game|episode|round|session) of TextWorld!\s*",
-            r"^It's time to explore the amazing world of TextWorld!\s*",
-            r"^You are now playing an? (?:profound|exciting|fast paced|life changing) (?:game|episode|round|session) of TextWorld!\s*",
-            r"^Who's got a virtual machine and is about to play through an? (?:profound|exciting|fast paced) round of TextWorld\? You do!\s*",
-            
-            # Clean up transitions while preserving task descriptions
-            r"^Here is how to play!\s*",
-            r"^Here is your task for today\.\s*",
-            r"to play!\s*",
-        ]
+        # Split goal line into sentences using multiple delimiters
+        sentences = re.split(r'[.!?]+\s*', goal_line.strip())
+        sentences = [s.strip() for s in sentences if s.strip()]  # Remove empty sentences
         
-        cleaned_goal = goal_line
-        for pattern in intro_patterns:
-            cleaned_goal = re.sub(pattern, "", cleaned_goal, flags=re.IGNORECASE).strip()
-            
-        # Final cleanup
-        cleaned_goal = cleaned_goal.strip('., ')
+        if len(sentences) > 1:
+            # If multiple sentences, remove the first one and join with periods
+            cleaned_goal = '. '.join(sentences[1:]) + '.'
+        else:
+            # If only one sentence, keep it and add period if needed
+            cleaned_goal = sentences[0] + ('.' if not sentences[0].endswith('.') else '')
+        
+        # Final cleanup (only removing leading/trailing spaces and common phrases)
+        cleaned_goal = cleaned_goal.strip()
         if cleaned_goal.lower().startswith("i need you to "):
             cleaned_goal = cleaned_goal[len("i need you to "):].strip()
-        
-        print(f"DEBUG - Final cleaned goal: {cleaned_goal}")
-        print(f"DEBUG - Setting self.goal to: {cleaned_goal}")
+            # Add period if it was removed
+            if not cleaned_goal.endswith('.'):
+                cleaned_goal += '.'
         
         self.goal = cleaned_goal
         return cleaned_goal
