@@ -2,10 +2,14 @@ import os
 from getpass import getpass
 from openai import OpenAI
 from time import sleep
+import time
 
 """
 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
 """
+
+# At the top of your file, add a global variable to store the history:
+CHAT_HISTORY = []
 
 def setup_openai_api():
     """Setup OpenAI API with key from user input or environment"""
@@ -37,7 +41,7 @@ def setup_openai_api():
         raise
 
 def get_llm_response(client, prompt, max_retries=3, model="gpt-4o"):
-    """Get response from OpenAI API with retry logic"""
+    """Get response from OpenAI API with retry logic and log conversation."""
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
@@ -47,10 +51,18 @@ def get_llm_response(client, prompt, max_retries=3, model="gpt-4o"):
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
-                max_tokens=500,
-                store=True
+                max_tokens=500
             )
-            return response.choices[0].message.content
+            answer = response.choices[0].message.content
+            
+            # Log conversation prompt and response to the global chat history
+            CHAT_HISTORY.append({
+                "prompt": prompt,
+                "response": answer,
+                "timestamp": time.time()  # if you want to record when it happened
+            })
+            
+            return answer
             
         except Exception as e:
             if "rate_limit" in str(e).lower() and attempt < max_retries - 1:
@@ -80,3 +92,16 @@ def validate_response_format(response):
         return False
         
     return True
+
+def save_chat_history(filepath="chat_history.json"):
+    """Save locally stored chat history to a JSON file."""
+    import json
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(CHAT_HISTORY, f, indent=2, ensure_ascii=False)
+        print(f"Chat history saved to {filepath}")
+        return CHAT_HISTORY
+        
+    except Exception as e:
+        print(f"Error saving chat history: {str(e)}")
+        raise

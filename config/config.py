@@ -3,6 +3,7 @@ from enum import Enum
 import os
 import subprocess
 import textworld
+import torch
 
 
 class RewardType(Enum):
@@ -100,14 +101,85 @@ class GameConfig:
 
 
 @dataclass
+class SFTConfig:
+    # Model settings
+    model_name: str = "google/flan-t5-base"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Training hyperparameters
+    learning_rate: float = 2e-5
+    batch_size: int = 8
+    num_epochs: int = 3
+    warmup_steps: int = 100
+    weight_decay: float = 0.01
+    max_grad_norm: float = 1.0
+    
+    # Sequence lengths
+    max_input_length: int = 512
+    max_output_length: int = 128
+    
+    # Optimizer settings
+    optimizer_type: str = "adamw"
+    scheduler_type: str = "linear"  # linear warmup with decay
+    
+    # Training features
+    gradient_accumulation_steps: int = 4
+    mixed_precision: bool = True  # Use mixed precision training
+    
+    # Validation
+    validation_split: float = 0.1  # 10% of data for validation
+    eval_steps: int = 100  # Evaluate every N steps
+    
+    # Checkpointing
+    checkpoint_dir: str = "./checkpoints"
+    save_steps: int = 500  # Save model every N steps
+    keep_checkpoint_max: int = 3  # Maximum number of checkpoints to keep
+    
+    # Logging
+    use_wandb: bool = False  # Whether to use Weights & Biases logging
+    wandb_project: str = "textworld-sft"
+    wandb_entity: str = None
+    log_steps: int = 10  # Log metrics every N steps
+    
+    # Data processing
+    num_workers: int = 4  # Number of workers for data loading
+    pin_memory: bool = True  # Pin memory for faster data transfer to GPU
+    
+    def __post_init__(self):
+        """Validate and process config after initialization"""
+        # Create checkpoint directory if it doesn't exist
+        if self.checkpoint_dir:
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+            
+        # Adjust batch size and gradient accumulation for small GPUs
+        if torch.cuda.is_available():
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3  # GB
+            if gpu_mem < 8:  # Less than 8GB GPU
+                self.batch_size = min(4, self.batch_size)
+                self.gradient_accumulation_steps = max(8, self.gradient_accumulation_steps)
+                self.mixed_precision = True
+                
+        # Validate device setting
+        if self.device == "cuda" and not torch.cuda.is_available():
+            print("Warning: CUDA requested but not available. Falling back to CPU.")
+            self.device = "cpu"
+            
+        # Adjust workers for CPU
+        if self.device == "cpu":
+            self.num_workers = min(2, self.num_workers)
+            self.pin_memory = False
+
+@dataclass
 class TextWorldConfig:
     def __init__(self,
                  game_config: GameConfig,
                  model_config: ModelConfig,
-                 mcts_config: MCTSConfig):
+                 mcts_config: MCTSConfig,
+                 sft_config: SFTConfig = None):  # Add SFTConfig as optional parameter
         self.game_config = game_config
         self.model_config = model_config
         self.mcts_config = mcts_config
+        self.sft_config = sft_config or SFTConfig()  # Use default if not provided
 
         self.excluded_actions = ["look", "inventory"]
 
