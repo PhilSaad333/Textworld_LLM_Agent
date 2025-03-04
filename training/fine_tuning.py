@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, get_linear_schedule_with_warmup
 from typing import List, Dict, Any
 import wandb
@@ -8,6 +8,8 @@ from tqdm import tqdm
 import os
 import re
 import random
+import json
+from torch.utils.data import Dataset
 
 class SFTTrainer:
     def __init__(self, config):
@@ -33,6 +35,16 @@ class SFTTrainer:
         # Initialize model and tokenizer
         self.model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+        
+        # Add special tokens for command and room tags
+        special_tokens = {
+            'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+        }
+        self.tokenizer.add_special_tokens(special_tokens)
+        
+        # Resize the model's token embeddings to account for the new tokens
+        self.model.resize_token_embeddings(len(self.tokenizer))
+        
         self.model.to(self.device)
         
         # Freeze all layers except the last n_unfrozen_layers
@@ -113,10 +125,15 @@ class SFTTrainer:
             
         Returns:
             dict: Processed batch with input_ids, attention_mask, and labels
-        """
+        """        
         # Extract inputs and outputs from batch
-        inputs = [example["input"] for example in batch]
-        outputs = [example["output"] for example in batch]
+        if isinstance(batch, dict):
+            inputs = batch["input"]
+            outputs = batch["output"]
+        else:
+            # If batch is a list of dicts
+            inputs = [example["input"] for example in batch]
+            outputs = [example["output"] for example in batch]
         
         # Tokenize inputs
         input_encodings = self.tokenizer(
@@ -143,7 +160,7 @@ class SFTTrainer:
             "labels": output_encodings.input_ids.to(self.device)
         }
         
-        # Replace padding token id with -100 for labels (PyTorch ignores -100 in loss calculation)
+        # Replace padding token id with -100 for labels
         model_inputs["labels"][model_inputs["labels"] == self.tokenizer.pad_token_id] = -100
         
         return model_inputs
@@ -167,7 +184,7 @@ class SFTTrainer:
             wandb.init(
                 project=self.config.wandb_project,
                 entity=self.config.wandb_entity,
-                config=self.config.__dict__
+                config=vars(self.config)
             )
         
         # Training loop
@@ -180,7 +197,10 @@ class SFTTrainer:
             # Log training metrics
             print(f"Training metrics:")
             for k, v in train_metrics.items():
-                print(f"  {k}: {v:.4f}")
+                if isinstance(v, (int, float)):
+                    print(f"  {k}: {v:.4f}")
+                else:
+                    print(f"  {k}: {v}")
                 if self.config.use_wandb:
                     wandb.log({f"train/{k}": v}, step=epoch)
             
@@ -198,7 +218,10 @@ class SFTTrainer:
                 
                 print(f"Validation metrics:")
                 for k, v in val_metrics.items():
-                    print(f"  {k}: {v:.4f}")
+                    if isinstance(v, (int, float)):
+                        print(f"  {k}: {v:.4f}")
+                    else:
+                        print(f"  {k}: {v}")
                     if self.config.use_wandb:
                         wandb.log({f"val/{k}": v}, step=epoch)
                 
@@ -317,15 +340,21 @@ class SFTTrainer:
                     attention_mask=inputs["attention_mask"],
                     max_length=self.config.max_output_length,
                     num_beams=4,
-                    early_stopping=True
+                    early_stopping=True,
+                    remove_invalid_values=True,
+                    # Add these parameters to improve formatting
+                    no_repeat_ngram_size=3,
+                    length_penalty=1.0
                 )
                 
                 # Decode predictions and labels
-                decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=True)
-                decoded_labels = self.tokenizer.batch_decode(
-                    inputs["labels"][inputs["labels"] != -100].reshape(-1, inputs["labels"].size(-1)), 
-                    skip_special_tokens=True
-                )
+                decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=False)
+                
+                # Create a mask for non-padding tokens
+                label_mask = inputs["labels"] != -100
+                labels_to_decode = inputs["labels"].clone()
+                labels_to_decode[~label_mask] = self.tokenizer.pad_token_id
+                decoded_labels = self.tokenizer.batch_decode(labels_to_decode, skip_special_tokens=False)
                 
                 all_predictions.extend(decoded_preds)
                 all_labels.extend(decoded_labels)
@@ -336,7 +365,7 @@ class SFTTrainer:
             'loss': total_loss / num_batches,
         }
         
-        # Add any additional metrics (e.g., format adherence, response structure)
+        # Add any additional metrics
         additional_metrics = self._compute_metrics(all_predictions, all_labels)
         metrics.update(additional_metrics)
         
@@ -373,7 +402,7 @@ class SFTTrainer:
         print(f"Checkpoint saved to {checkpoint_path}")
         
         # Clean up old checkpoints if needed
-        if self.config.keep_checkpoint_max > 0:
+        if hasattr(self.config, 'keep_checkpoint_max') and self.config.keep_checkpoint_max > 0:
             checkpoints = sorted([
                 f for f in os.listdir(self.config.checkpoint_dir)
                 if f.startswith('checkpoint_epoch_') and f.endswith('.pt')
@@ -419,8 +448,8 @@ class SFTTrainer:
         Returns:
             dict: Computed metrics including:
                 - format_adherence: % of responses following A/B/C format
-                - action_format: % of responses with valid "Therefore, I choose:" format
-                - room_format: % of responses with valid room prediction format
+                - action_format: % of responses with valid "Therefore, I choose:" format with <command> tags
+                - room_format: % of responses with valid room prediction format with <room> tags
                 - exact_match: % of responses matching labels exactly
         """
         metrics = {
@@ -440,21 +469,21 @@ class SFTTrainer:
                 metrics['exact_match'] += 1
             
             # Check format adherence (A/B/C structure)
-            has_section_a = bool(re.search(r'^A\)', pred, re.MULTILINE | re.IGNORECASE))
-            has_section_b = bool(re.search(r'^B\)', pred, re.MULTILINE | re.IGNORECASE))
-            has_section_c = bool(re.search(r'^C\)', pred, re.MULTILINE | re.IGNORECASE))
+            has_section_a = bool(re.search(r'A\)', pred, re.IGNORECASE))
+            has_section_b = bool(re.search(r'B\)', pred, re.IGNORECASE))
+            has_section_c = bool(re.search(r'C\)', pred, re.IGNORECASE))
             
             if has_section_a and has_section_b and has_section_c:
                 metrics['format_adherence'] += 1
             
-            # Check action format
-            action_match = re.search(r"Therefore,\s*I\s*choose:\s*(.+?)(?:\n|$)", 
+            # Check action format with <command> tags
+            action_match = re.search(r"Therefore,\s*I\s*choose:\s*<command>(.+?)</command>", 
                                    pred, re.IGNORECASE)
             if action_match:
                 metrics['action_format'] += 1
             
-            # Check room prediction format
-            room_match = re.search(r"I\s*predict\s*that\s*I\s*will\s*be\s*in\s*room:\s*(.+?)(?:\n|$)", 
+            # Check room prediction format with <room> tags
+            room_match = re.search(r"I\s*predict\s*that\s*I\s*will\s*be\s*in\s*room:\s*<room>(.+?)</room>", 
                                  pred, re.IGNORECASE)
             if room_match:
                 metrics['room_format'] += 1
@@ -475,7 +504,9 @@ class SFTTrainer:
                     'label': labels[i],
                     'matches_format': bool(re.search(r'^A\)', predictions[i], re.MULTILINE | re.IGNORECASE) and
                                         re.search(r'^B\)', predictions[i], re.MULTILINE | re.IGNORECASE) and
-                                        re.search(r'^C\)', predictions[i], re.MULTILINE | re.IGNORECASE))
+                                        re.search(r'^C\)', predictions[i], re.MULTILINE | re.IGNORECASE)),
+                    'has_command_tags': bool(re.search(r"<command>(.+?)</command>", predictions[i], re.IGNORECASE)),
+                    'has_room_tags': bool(re.search(r"<room>(.+?)</room>", predictions[i], re.IGNORECASE))
                 }
                 for i in sample_indices
             ]
@@ -484,9 +515,9 @@ class SFTTrainer:
             if self.config.use_wandb:
                 wandb.log({
                     "examples": wandb.Table(
-                        columns=["Prediction", "Label", "Matches Format"],
+                        columns=["Prediction", "Label", "Matches Format", "Has Command Tags", "Has Room Tags"],
                         data=[
-                            [s['prediction'], s['label'], s['matches_format']]
+                            [s['prediction'], s['label'], s['matches_format'], s['has_command_tags'], s['has_room_tags']]
                             for s in metrics['samples']
                         ]
                     )
@@ -496,3 +527,22 @@ class SFTTrainer:
             print(f"Warning: Error in sample analysis: {str(e)}")
         
         return metrics
+
+class CombinedSFTDataset(Dataset):
+    def __init__(self, file_path):
+        with open(file_path, 'r') as f:
+            self.examples = json.load(f)
+    
+    def __len__(self):
+        return len(self.examples)
+    
+    def __getitem__(self, idx):
+        example = self.examples[idx]
+        # Convert to tensor format if needed
+        return {
+            "input": example["input"],
+            "output": example["output"]
+        }
+
+
+

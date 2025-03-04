@@ -3,13 +3,14 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import re
 
 class TextWorldLLMAgent:
-    def __init__(self, config, training_mode=False):
+    def __init__(self, config, training_mode=False, model_path=None):
         """
         Initialize LLM-based TextWorld agent
         
         Args:
             config: Configuration object containing model settings
             training_mode: If True, enables batch processing and disables debug output
+            model_path: Optional path to a fine-tuned model checkpoint
         """
         self.config = config
         self.training_mode = training_mode
@@ -24,19 +25,50 @@ class TextWorldLLMAgent:
         
         # Initialize model and tokenizer only if not in training mode
         if not training_mode:
-            print("Loading FLAN-T5-BASE model and tokenizer...")
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-                self.tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
-                
-                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-                print(f"Using device: {self.device}")
-                self.model.to(self.device)
-            except Exception as e:
-                raise RuntimeError(f"Failed to load model: {str(e)}")
+            if model_path:
+                print(f"Loading fine-tuned model from {model_path}...")
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    # Load the base model and tokenizer
+                    self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+                    self.tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+                    
+                    # Add special tokens for command and room tags
+                    special_tokens = {
+                        'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+                    }
+                    self.tokenizer.add_special_tokens(special_tokens)
+                    
+                    # Resize the model's token embeddings to account for the new tokens
+                    self.model.resize_token_embeddings(len(self.tokenizer))
+                    
+                    # Load the fine-tuned weights
+                    checkpoint = torch.load(model_path, map_location='cpu')
+                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                    
+                    self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    print(f"Using device: {self.device}")
+                    self.model.to(self.device)
+                    self.model.eval()  # Set to evaluation mode
+                    
+                except Exception as e:
+                    raise RuntimeError(f"Failed to load fine-tuned model: {str(e)}")
+            else:
+                print("Loading FLAN-T5-BASE model and tokenizer...")
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+                    self.tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+                    
+                    self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    print(f"Using device: {self.device}")
+                    self.model.to(self.device)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to load model: {str(e)}")
         
         # Initialize state tracking
         self.reset()
@@ -160,98 +192,63 @@ class TextWorldLLMAgent:
         
         return clean_obs
 
-    def format_prompt(self, obs, valid_actions, infos, batch_mode=False):
-        """
-        Format input for LLM. Can handle both single inputs and batched inputs.
+    def filter_valid_actions(self, valid_actions):
+        """Filter out 'look' and 'inventory' actions"""
+        return [action for action in valid_actions if action not in ['look', 'inventory']]
+
+    def format_prompt(self, obs, valid_actions, room):
+        """Format prompt for LLM using the same format as SFT training"""
+        # Clean observation
+        clean_obs = self._clean_observation(obs)
         
-        Args:
-            obs: Single observation string or list of observation strings
-            valid_actions: Single list of valid actions or list of lists
-            infos: Single info dict or list of info dicts
-            batch_mode: If True, process inputs as batch
-            
-        Returns:
-            Single formatted prompt string or list of prompt strings
-        """
-        if not batch_mode:
-            # Single input processing - original logic
-            inventory = infos.get('inventory', 'nothing')
-            room = self._get_room_name(obs)
-            clean_obs = self._clean_observation(obs)
-            
-            history_pairs = [f"({r}: {a})" for r, a in self.action_room_history[-self.config.game_config.max_history_actions:]]
-            history_str = " → ".join(history_pairs) if history_pairs else "None"
-            
-            numbered_actions = [f"{i+1}) {action}" for i, action in enumerate(valid_actions)]
-            
-            prompt = f"""You are playing a text adventure game. Here's your situation:
+        # Format action history
+        history_str = "None"
+        if self.action_room_history:
+            history_items = []
+            for i, (r, a) in enumerate(self.action_room_history[-5:], 1):  # Show last 5 actions
+                history_items.append(f"{i}. In {r}, I chose {a}")
+            history_str = "\n".join(history_items)
+        
+        # Filter actions
+        filtered_actions = self.filter_valid_actions(valid_actions)
+        
+        # Get inventory if available
+        inventory_str = self.true_state.get('inventory', "No inventory information available")
+        
+        prompt = f"""You are playing a text adventure game. Analyze this game state and give a response formatted as requested:
 
-GOAL: {self.goal if self.goal else 'Not set'}
+Game State:
+Goal: {self.goal if self.goal else "Unknown"}
+Location: {room}
+Observation: {clean_obs}
+Inventory: {inventory_str}
+Previous actions:
+{history_str}
+Currently available actions: {filtered_actions}
 
-Current Location: {room if room else 'Unknown'}
-Inventory: {inventory}
-Recent Actions: {history_str}
+Generate a *concise* response in the following format:
 
-What you see: {clean_obs}
+A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve.
 
-IMPORTANT: Object names must match exactly! For example:
-- 'key' is NOT the same as 'latchkey'
-- 'door' is NOT the same as 'wooden door'
+B) Then, state your chosen action - Make sure it is in the available actions list:
+Therefore, I choose: <command>[exact action]</command>
 
-Available actions:
-{chr(10).join(numbered_actions)}
-
-Instructions:
-1. Analyze each action and predict its outcome
-2. Choose the best action to achieve the goal
-3. End your response with "Therefore, I choose: [exact action]"
+C) Then, state your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
+I predict that I will be in room: <room>[room name]</room>
 
 Your response:"""
-            
-            if not self.training_mode:
-                print("\nDEBUG - Formatted prompt:")
-                print(prompt)
-                
-            return prompt
-            
-        else:
-            # Batch processing - shorter prompts for training
-            prompts = []
-            for i in range(len(obs)):
-                inventory = infos[i].get('inventory', 'nothing')
-                room = self._get_room_name(obs[i])
-                clean_obs = self._clean_observation(obs[i])
-                
-                # Note: In batch mode, we don't maintain action history
-                numbered_actions = [f"{j+1}) {action}" for j, action in enumerate(valid_actions[i])]
-                
-                prompt = f"""You are playing a text adventure game. Here's your situation:
 
-GOAL: {self.goals[i] if hasattr(self, 'goals') else 'Not set'}
+        return prompt
 
-Current Location: {room if room else 'Unknown'}
-Inventory: {inventory}
-
-What you see: {clean_obs}
-
-Available actions:
-{chr(10).join(numbered_actions)}
-
-Therefore, I choose:"""  # Shorter prompt for training
-                
-                prompts.append(prompt)
-                
-            return prompts
-    
     def get_action(self, env, obs, infos, valid_actions, step=0, batch_mode=False):
         """Get next action using LLM. Can handle both single and batched inputs."""
         if not batch_mode:
             # Single input processing - original logic
             clean_obs = self._clean_observation(obs)
             
-            if not self.training_mode:
-                print("\nDEBUG - get_action called")
-                print(f"DEBUG - Current observation (cleaned): {clean_obs[:100]}...")
+            #if not self.training_mode:
+            #    print("\nDEBUG - get_action called")
+            #    print(f"DEBUG - Current observation (cleaned): {clean_obs[:100]}...")
             
             if self.goal is None or self.goal == "Not set":
                 self.goal = self.parse_goal(clean_obs)
@@ -261,9 +258,10 @@ Therefore, I choose:"""  # Shorter prompt for training
                 
             # Get action with up to 3 attempts
             max_attempts = 3 if not self.training_mode else 1
+            format_failures = 0
             
             for attempt in range(max_attempts):
-                prompt = self.format_prompt(obs, valid_actions, infos)
+                prompt = self.format_prompt(obs, valid_actions, self._get_room_name(obs))
                 
                 inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
                 outputs = self.model.generate(
@@ -276,32 +274,81 @@ Therefore, I choose:"""  # Shorter prompt for training
                     no_repeat_ngram_size=3,
                     early_stopping=True
                 )
-                full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+                # Remove <pad> token if present
+                full_response = full_response.replace("<pad>", "").strip()
                 
                 if not self.training_mode:
                     print(f"\nDEBUG - Model full response:\n{full_response}")
                 
-                # Extract action choice
-                choice_match = re.search(r"Therefore,\s*I\s*choose:\s*(.+?)(?:\n|$)", full_response, re.IGNORECASE)
-                if choice_match:
-                    action = choice_match.group(1).strip()
+                # Check format using the check_format function
+                format_check = check_format(full_response)
+                
+                if format_check["has_command_tags"] and format_check["has_room_tags"]:
+                    action = format_check["command"]
+                    predicted_room = format_check["room"]
+                    
+                    # Verify action is valid
                     if action in valid_actions:
                         if not self.training_mode:
                             current_room = self._get_room_name(obs)
                             self.action_room_history.append((current_room, action))
-                        return action, {}
-                
-                if not self.training_mode:
-                    print(f"DEBUG - Invalid action in attempt {attempt + 1}")
+                        
+                        # Track format success in true_state
+                        self.true_state.update({
+                            'format_check_passed': True,
+                            'format_failures': format_failures,
+                            'predicted_room': predicted_room
+                        })
+                        
+                        return action, {"predicted_room": predicted_room, "format_check": format_check}
+                    else:
+                        if not self.training_mode:
+                            print(f"DEBUG - Action '{action}' not in valid actions")
+                        format_failures += 1
+                else:
+                    if not self.training_mode:
+                        print(f"DEBUG - Format check failed: {format_check}")
+                    format_failures += 1
+                    
+                    # Try fallback extraction methods
+                    # 1. Try old pattern with "Therefore, I choose:"
+                    choice_match = re.search(r"Therefore,\s*I\s*choose:\s*(.+?)(?:\n|$)", full_response, re.IGNORECASE)
+                    if choice_match:
+                        action = choice_match.group(1).strip()
+                        if action in valid_actions:
+                            if not self.training_mode:
+                                current_room = self._get_room_name(obs)
+                                self.action_room_history.append((current_room, action))
+                            
+                            # Track format failure in true_state
+                            self.true_state.update({
+                                'format_check_passed': False,
+                                'format_failures': format_failures,
+                                'predicted_room': "Unknown"
+                            })
+                            
+                            return action, {"format_check_passed": False}
             
-            # Fallback
+            # All attempts failed, use fallback
             if not self.training_mode:
                 print("WARNING - Failed to get valid action after max attempts")
-            return valid_actions[0], {}
+            
+            # Track format failure in true_state
+            self.true_state.update({
+                'format_check_passed': False,
+                'format_failures': max_attempts,
+                'predicted_room': "Unknown"
+            })
+            
+            return valid_actions[0], {"format_check_passed": False}
             
         else:
             # Batch processing - simplified logic for training
-            prompts = self.format_prompt(obs, valid_actions, infos, batch_mode=True)
+            prompts = []
+            for i in range(len(obs)):
+                prompt = self.format_prompt(obs[i], valid_actions[i], self._get_room_name(obs[i]))
+                prompts.append(prompt)
             
             # Process all prompts in batch
             inputs = self.tokenizer(prompts, padding=True, return_tensors="pt").to(self.device)
@@ -314,16 +361,26 @@ Therefore, I choose:"""  # Shorter prompt for training
                 early_stopping=True
             )
             
-            responses = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            responses = self.tokenizer.batch_decode(outputs, skip_special_tokens=False)
             actions = []
+            format_checks = []
             
             for i, response in enumerate(responses):
                 valid_acts = valid_actions[i]
-                # Take first valid action mentioned in response
-                action = next((act for act in valid_acts if act in response), valid_acts[0])
-                actions.append(action)
+                response = response.replace("<pad>", "").strip()
+                
+                # Check format
+                format_check = check_format(response)
+                format_checks.append(format_check)
+                
+                if format_check["has_command_tags"] and format_check["command"] in valid_acts:
+                    actions.append(format_check["command"])
+                else:
+                    # Fallback: take first valid action mentioned in response
+                    action = next((act for act in valid_acts if act in response), valid_acts[0])
+                    actions.append(action)
             
-            return actions, {}
+            return actions, {"format_checks": format_checks}
 
     def update_state_after_action(self, obs, reward, done, infos):
         """Update agent's state after an action is taken"""
@@ -424,3 +481,45 @@ Therefore, I choose:"""  # Shorter prompt for training
         if not hasattr(self, 'true_state'):
             self.true_state = {}
         self.true_state['step_count'] = step_count
+
+
+
+
+
+def check_format(text):
+    """
+    Check if the text follows the expected format with command and room tags.
+    
+    Args:
+        text: Text to check
+        
+    Returns:
+        dict: Format check results including:
+            - has_command_tags: Whether text has <command> tags
+            - has_room_tags: Whether text has <room> tags
+            - command: Extracted command (or "None" if not found)
+            - room: Extracted room (or "None" if not found)
+    """
+    # Check for A/B/C format (not strict about line starts)
+    has_section_a = bool(re.search(r'A\)', text, re.IGNORECASE))
+    has_section_b = bool(re.search(r'B\)', text, re.IGNORECASE))
+    has_section_c = bool(re.search(r'C\)', text, re.IGNORECASE))
+    
+    # Check for command and room tags
+    has_command_tags = '<command>' in text and '</command>' in text
+    has_room_tags = '<room>' in text and '</room>' in text
+    
+    # Extract command and room, handling the extra spaces
+    command_match = re.search(r"<command>\s*(.+?)\s*</command>", text)
+    command = command_match.group(1).strip() if command_match else "None"
+    
+    room_match = re.search(r"<room>\s*(.+?)\s*</room>", text)
+    room = room_match.group(1).strip() if room_match else "None"
+    
+    return {
+        "format_correct": has_section_a and has_section_b and has_section_c,
+        "has_command_tags": has_command_tags,
+        "has_room_tags": has_room_tags,
+        "command": command,
+        "room": room
+    }

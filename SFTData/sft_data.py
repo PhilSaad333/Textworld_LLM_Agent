@@ -65,7 +65,7 @@ class SFTData(Dataset):
                 
                 # Parse goal and clean first observation
                 agent.parse_goal(obs)
-                clean_obs = agent._clean_observation(obs)
+                clean_obs = agent._clean_first_observation(obs) if agent.true_state['step_count'] == 0 else agent._clean_observation(obs)
                 
                 while not done:
                     valid_actions = info['admissible_commands']
@@ -136,7 +136,7 @@ Your response:"""
         self.examples.extend(training_data)
         return training_data
     
-    def extract_action(self,response, valid_actions):
+    def extract_action(self, response, valid_actions):
         """Extract chosen action from model response
         
         Args:
@@ -236,3 +236,83 @@ Your response:"""
                     filtered_actions.append(action)
         
         return filtered_actions if filtered_actions else valid_actions
+    
+    def reformat_data(self, filename: str = None):
+        """
+        Reformat data so that it is demarked by special tokens
+        
+        For now, we just surround the command and room with <command> and <room> tags
+        """
+        temp_examples = []
+        if filename:
+            # Load specific file
+            filepath = os.path.join(self.data_dir, filename)
+            with open(filepath, 'r') as f:
+                temp_examples.extend(json.load(f))
+        else:
+            # Load all JSON files in directory
+            for filename in os.listdir(self.data_dir):
+                if filename.endswith('.json'):
+                    filepath = os.path.join(self.data_dir, filename)
+                    with open(filepath, 'r') as f:
+                        temp_examples.extend(json.load(f))
+        
+        def reformat_input(input_string):
+            # First, check if the string contains the required parts
+            has_parts = re.search(r'A\)(.*?)B\)(.*?)C\)(.*)', input_string, re.DOTALL)
+            
+            if not has_parts:
+                return "String does not follow required format."
+            
+            # First, process part B to add <command> tags
+            # Look for "Therefore, I choose: " followed by any text until end of part B
+            part_b_pattern = r'(B\).*?Therefore, I choose: )([^\n]*)'
+            part_b_replacement = r'\1<command>\2</command>'
+            
+            modified_string = re.sub(part_b_pattern, part_b_replacement, input_string, flags=re.DOTALL)
+            
+            # Then, process part C to add <room> tags
+            # Look for "I predict that I will be in room: " followed by any text 
+            part_c_pattern = r'(C\).*?I predict that I will be in room: )([^\n]*)'
+            part_c_replacement = r'\1<room>\2</room>'
+            
+            modified_string = re.sub(part_c_pattern, part_c_replacement, modified_string, flags=re.DOTALL)
+            
+            return modified_string
+
+        def reformat_output(output_string):
+            # Check if the string contains the required parts
+            has_parts = re.search(r'A\)(.*?)B\)(.*?)C\)(.*)', output_string, re.DOTALL)
+            
+            if not has_parts:
+                return "String does not follow required A), B), C) format"
+
+            # First, process part B to add <command> tags
+            # Look for "Thefore, I choose: " followed by any text until end of part B
+            part_b_pattern = r'(B\).*?Therefore, I choose: )([^\n*]*)'
+            part_b_replacement = r'\1<command>\2</command>'
+
+            modified_string = re.sub(part_b_pattern, part_b_replacement, output_string, flags=re.DOTALL)
+
+            # Then, process part C to add <room> tags
+            # Look for "I predict that I will be in room: " followed by any text 
+            part_c_pattern = r'(C\).*?I predict that I will be in room: )([^\n]*)'
+            part_c_replacement = r'\1<room>\2</room>'
+            
+            modified_string = re.sub(part_c_pattern, part_c_replacement, modified_string, flags=re.DOTALL)
+            
+            return modified_string
+
+        for ex in temp_examples:
+            ex['input'] = reformat_input(ex['input'])
+            ex['output'] = reformat_output(ex['output'])
+
+        if filename:
+            new_filename = filename.split('.')[0] + '_reformatted.json'
+            filepath = os.path.join(self.data_dir, new_filename)
+            with open(filepath, 'w') as f:
+                json.dump(temp_examples, f)
+        else:
+            print("No filename provided, so no file was saved")
+
+
