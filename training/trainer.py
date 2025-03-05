@@ -1,492 +1,340 @@
+from trl import GRPOTrainer, GRPOConfig
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import torch
+from datasets import Dataset
+from environment.task_env import TaskEnvManager, TaskConfig
+from agents.textworld_llm_agent import TextWorldLLMAgent
 import numpy as np
-from collections import defaultdict
-from environment.environment_manager import DifficultyEnvironmentManager
+from config.config import GameConfig, RewardType, GoalType, GameType, get_game_config
 
-
-class ExperienceBuffer:
-    """Stores and manages training experiences"""
-    def __init__(self, config):
-        self.config = config
+class TextWorldRLTrainer:
+    def __init__(self, rl_config, main_config=None, model_path=None, use_map=True):
+        """Initialize the RL trainer
         
-        # Main buffers
-        self.regular_buffer = []  # All episodes
-        self.success_buffer = []  # Only successful episodes
+        Args:
+            rl_config: Configuration specific to RL training
+            main_config: Main TextWorld configuration (optional)
+            model_path: Path to pretrained model (optional)
+            use_map: Whether to use the map tool in the agent
+        """
+        self.config = rl_config
         
-        # Priority tracking
-        self.priorities = []  # Priority weights for regular buffer
-        self.success_priorities = []  # Priority weights for success buffer
-        
-        # Difficulty tracking
-        self.difficulty_counts = defaultdict(int)  # Count episodes per difficulty
-        self.success_difficulty_counts = defaultdict(int)
-        
-        # Buffer limits
-        self.max_size = config.training_config.buffer_size
-        self.max_success_size = config.training_config.success_buffer_size
-    
-    def add_episode(self, episode, priority=1.0):
-        """Add episode to appropriate buffer"""
-        if episode.success:
-            # Add to success buffer
-            if len(self.success_buffer) >= self.max_success_size:
-                # Remove oldest episode of same difficulty if buffer full
-                for i, old_ep in enumerate(self.success_buffer):
-                    if old_ep.difficulty == episode.difficulty:
-                        self.success_buffer.pop(i)
-                        self.success_priorities.pop(i)
-                        self.success_difficulty_counts[episode.difficulty] -= 1
-                        break
+        # Create or use main config
+        if main_config is None:
+            # Import necessary components
+            from config.config import get_game_config, RewardType, GoalType
             
-            self.success_buffer.append(episode)
-            self.success_priorities.append(priority)
-            self.success_difficulty_counts[episode.difficulty] += 1
-            
-        # Always add to regular buffer
-        if len(self.regular_buffer) >= self.max_size:
-            # Remove oldest episode of same difficulty
-            for i, old_ep in enumerate(self.regular_buffer):
-                if old_ep.difficulty == episode.difficulty:
-                    self.regular_buffer.pop(i)
-                    self.priorities.pop(i)
-                    self.difficulty_counts[episode.difficulty] -= 1
-                    break
-        
-        self.regular_buffer.append(episode)
-        self.priorities.append(priority)
-        self.difficulty_counts[episode.difficulty] += 1
-    
-    def sample_batch(self, batch_size):
-        """Sample a batch of episodes using priorities and difficulty window"""
-        if not self.regular_buffer:
-            return None
-            
-        # Get current difficulty window
-        difficulties = sorted(self.difficulty_counts.keys())
-        min_diff = max(min(difficulties), self.config.training_config.min_difficulty)
-        max_diff = min(max(difficulties), self.config.training_config.max_difficulty)
-        window_size = min(self.config.training_config.window_size, max_diff - min_diff + 1)
-        
-        # Filter episodes in current window
-        regular_indices = [
-            i for i, ep in enumerate(self.regular_buffer)
-            if min_diff <= ep.difficulty <= min_diff + window_size - 1
-        ]
-        success_indices = [
-            i for i, ep in enumerate(self.success_buffer)
-            if min_diff <= ep.difficulty <= min_diff + window_size - 1
-        ]
-        
-        if not regular_indices:
-            return None
-            
-        # Calculate sampling weights
-        regular_weights = np.array([self.priorities[i] for i in regular_indices])
-        regular_weights = regular_weights ** self.config.training_config.priority_alpha
-        regular_weights = regular_weights / regular_weights.sum()
-        
-        if success_indices:
-            success_weights = np.array([self.success_priorities[i] for i in success_indices])
-            success_weights = success_weights ** self.config.training_config.priority_alpha
-            success_weights = success_weights / success_weights.sum()
-        
-        # Sample episodes
-        n_success = min(len(success_indices), batch_size // 4)  # 25% from success buffer
-        n_regular = batch_size - n_success
-        
-        regular_samples = []
-        if n_regular > 0:
-            sampled_indices = np.random.choice(
-                regular_indices, 
-                size=n_regular, 
-                p=regular_weights,
-                replace=True
+            # Create a default main config
+            main_config = get_game_config(
+                reward_type=RewardType.DENSE,
+                goal_type=GoalType.DETAILED,
+                max_history_actions=3
             )
-            regular_samples = [self.regular_buffer[i] for i in sampled_indices]
         
-        success_samples = []
-        if n_success > 0 and success_indices:
-            sampled_indices = np.random.choice(
-                success_indices,
-                size=n_success,
-                p=success_weights,
-                replace=True
+        self.main_config = main_config
+        
+        # Create environment manager using just the task_config
+        self.task_config = TaskConfig(
+            max_steps=rl_config.max_steps,
+            scale=rl_config.scale if hasattr(rl_config, 'scale') else 10
+        )
+        self.env_manager = TaskEnvManager(self.task_config)
+        
+        # Initialize tokenizer first
+        self.tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+        
+        # Add special tokens to tokenizer before loading the model
+        special_tokens = {
+            'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+        }
+        self.tokenizer.add_special_tokens(special_tokens)
+        
+        # Check if model_path is a .pt file or a directory
+        if model_path and model_path.endswith('.pt'):
+            # Load from .pt file
+            print(f"Loading model from PyTorch checkpoint: {model_path}")
+            checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            
+            # Initialize the model with the base architecture
+            self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+            
+            # Resize model embeddings to match tokenizer with special tokens
+            self.model.resize_token_embeddings(len(self.tokenizer))
+            
+            # Check the structure of the checkpoint
+            if "model_state_dict" in checkpoint:
+                # This is a training checkpoint with multiple components
+                print("Detected training checkpoint format. Loading model_state_dict.")
+                self.model.load_state_dict(checkpoint["model_state_dict"])
+            else:
+                # This is just a model state dict
+                print("Detected model state dict format.")
+                self.model.load_state_dict(checkpoint)
+        else:
+            # Load from Hugging Face model directory or hub
+            print(f"Loading model from directory or hub: {model_path or 'google/flan-t5-base'}")
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(
+                model_path if model_path else "google/flan-t5-base"
             )
-            success_samples = [self.success_buffer[i] for i in sampled_indices]
+            # Resize model embeddings to match tokenizer with special tokens
+            self.model.resize_token_embeddings(len(self.tokenizer))
         
-        return regular_samples + success_samples
-    
-    def update_priorities(self, indices, priorities):
-        """Update priority weights for episodes"""
-        for idx, priority in zip(indices, priorities):
-            if idx < len(self.priorities):
-                self.priorities[idx] = priority
-    
-    def get_stats(self):
-        """Return buffer statistics"""
-        return {
-            'regular_size': len(self.regular_buffer),
-            'success_size': len(self.success_buffer),
-            'difficulty_counts': dict(self.difficulty_counts),
-            'success_difficulty_counts': dict(self.success_difficulty_counts),
-            'mean_priority': np.mean(self.priorities) if self.priorities else 0,
-            'mean_success_priority': np.mean(self.success_priorities) if self.success_priorities else 0
-        }
-
-class Episode:
-    """Container for episode data"""
-    def __init__(self, difficulty, max_steps):
-        # Episode metadata
-        self.difficulty = difficulty
-        self.max_steps = max_steps
-        self.success = False
+        # Explicitly move model to GPU if available
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
+        self.model = self.model.to(self.device)
         
-        # Trajectory data
-        self.states = []  # List of observations/states
-        self.actions = []  # Actions taken
-        self.rewards = []  # Rewards received
-        self.valid_actions = []  # Valid actions at each step
-        self.rooms = []  # Rooms visited
+        # Create agent for evaluation
+        self.agent = TextWorldLLMAgent(self.main_config, use_map=use_map)
         
-        # MCTS statistics
-        self.mcts_policies = []  # Action probabilities from MCTS
-        self.visit_counts = []  # Visit counts for each action
-        self.q_values = []  # Q-values from search
-        self.room_predictions = []  # Room predictions at each step
+        # Set the model and tokenizer directly instead of having the agent load them
+        self.agent.model = self.model
+        self.agent.tokenizer = self.tokenizer
+        self.agent.device = self.device  # Explicitly set the agent's device
         
-        # Training targets (computed later)
-        self.returns = None
-        self.values = None
-    
-    def add_step(self, state, action, reward, valid_actions, mcts_stats):
-        """Add a step to the episode"""
-        self.states.append(state)
-        self.actions.append(action)
-        self.rewards.append(reward)
-        self.valid_actions.append(valid_actions)
-        self.rooms.append(state['current_room'])
-        
-        # Store MCTS statistics
-        self.mcts_policies.append(mcts_stats['prior_probs'])
-        self.visit_counts.append(mcts_stats['visit_counts'])
-        self.q_values.append(mcts_stats['q_values'])
-        self.room_predictions.append(mcts_stats['room_predictions'])
-    
-    def compute_returns(self, discount_factor=1.0):
-        """Calculate Monte Carlo returns for each step"""
-        self.returns = []
-        R = 0
-        for r in reversed(self.rewards):
-            R = r + discount_factor * R
-            self.returns.insert(0, R)
-    
-    def to_training_format(self, text_processor):
-        """Convert episode data to training tensors"""
-        # Process text data
-        processed_states = [
-            text_processor.process_state(state['observation'])
-            for state in self.states
-        ]
-        
-        processed_actions = [
-            text_processor.process_actions(actions)
-            for actions in self.valid_actions
-        ]
-        
-        # Convert MCTS policies to tensors
-        policy_targets = []
-        for valid_acts, visit_counts in zip(self.valid_actions, self.visit_counts):
-            # Normalize visit counts to get policy target
-            total_visits = sum(visit_counts.values())
-            policy = torch.zeros(len(valid_acts))
-            for i, act in enumerate(valid_acts):
-                policy[i] = visit_counts.get(act, 0) / max(total_visits, 1)
-            policy_targets.append(policy)
-        
-        return {
-            'states': processed_states,
-            'actions': processed_actions,
-            'policy_targets': policy_targets,
-            'value_targets': torch.tensor(self.returns),
-            'room_targets': self.rooms[1:],  # Next room for each state
-            'metadata': {
-                'difficulty': self.difficulty,
-                'success': self.success,
-                'length': len(self.states)
-            }
-        }
-    
-    def save_raw_text(self, path):
-        """Save raw text of episode for analysis"""
-        if not self.success:
-            return
-            
-        with open(path, 'w') as f:
-            f.write(f"Difficulty: {self.difficulty}\n")
-            f.write(f"Steps: {len(self.states)}\n\n")
-            
-            for i, (state, action) in enumerate(zip(self.states, self.actions)):
-                f.write(f"Step {i}:\n")
-                f.write(f"Room: {state['current_room']}\n")
-                f.write(f"Observation: {state['observation']}\n")
-                f.write(f"Action: {action}\n")
-                f.write(f"Reward: {self.rewards[i]}\n\n")
-
-class TextWorldTrainer:
-    """Main training orchestrator"""
-    def __init__(self, config, agent):
-        self.config = config
-        self.agent = agent
-        self.buffer = ExperienceBuffer(config)
-        self.env_manager = DifficultyEnvironmentManager(config)
-        
-        # Track current difficulty window
-        self.current_difficulties = range(
-            config.training_config.min_difficulty,
-            config.training_config.min_difficulty + config.training_config.window_size
+        # Configure GRPO
+        self.grpo_config = GRPOConfig(
+            learning_rate=rl_config.learning_rate,
+            per_device_train_batch_size=rl_config.batch_size,
+            gradient_accumulation_steps=rl_config.gradient_accumulation_steps if hasattr(rl_config, 'gradient_accumulation_steps') else 4,
+            max_completion_length=rl_config.max_output_length if hasattr(rl_config, 'max_output_length') else 128,
+            max_prompt_length=rl_config.max_input_length if hasattr(rl_config, 'max_input_length') else 512,
+            num_train_epochs=rl_config.num_epochs,
+            logging_steps=rl_config.log_steps if hasattr(rl_config, 'log_steps') else 10,
+            save_steps=rl_config.save_steps if hasattr(rl_config, 'save_steps') else 100,
+            output_dir=rl_config.checkpoint_dir,
+            remove_unused_columns=False,
+            gradient_checkpointing=True,
+            optim="adamw_torch",
+            seed=42,
+            # GRPO specific parameters
+            beta=rl_config.beta if hasattr(rl_config, 'beta') else 0.1,  # KL penalty coefficient
+            use_vllm=rl_config.use_vllm if hasattr(rl_config, 'use_vllm') else False,
+            temperature=rl_config.temperature if hasattr(rl_config, 'temperature') else 0.7,
         )
         
-        # Training metrics
-        self.metrics = defaultdict(list)
-        
-    def initialize_environments(self):
-        """Create environments for current difficulty window"""
-        print("Initializing environments for difficulties:", self.current_difficulties)
-        for diff in self.current_difficulties:
-            self.env_manager.get_or_create_env(diff)
-    
-    def collect_experience(self, episodes_per_difficulty=None):
-        """Collect experience by playing episodes"""
-        if episodes_per_difficulty is None:
-            episodes_per_difficulty = self.config.training_config.episodes_per_difficulty
-        
-        success_count = 0
-        
-        # Collect episodes for each difficulty in the current window
-        for difficulty in self.current_difficulties:
-            print(f"\nCollecting {episodes_per_difficulty} episodes for difficulty {difficulty}")
+    def collect_gameplay_data(self, difficulties=None, episodes_per_difficulty=5):
+        """Collect gameplay data for training"""
+        if difficulties is None:
+            difficulties = self.config.difficulties if hasattr(self.config, 'difficulties') and self.config.difficulties else [1, 5, 10]
             
-            for ep_num in range(episodes_per_difficulty):
-                print(f"\nStarting episode {ep_num + 1} for difficulty {difficulty}")
+        episodes_per_difficulty = self.config.episodes_per_difficulty if hasattr(self.config, 'episodes_per_difficulty') else episodes_per_difficulty
+            
+        all_prompts = []
+        all_completions = []
+        all_rewards = []
+        all_episode_completions = []  # Track if the episode was completed successfully
+        all_format_checks = []  # Track format check results
+        
+        # Use the class device attribute instead of checking model parameters
+        print(f"Using device for data collection: {self.device}")
+        
+        # Ensure model is on the correct device before starting
+        self.model = self.model.to(self.device)
+        
+        for difficulty in difficulties:
+            print(f"Collecting data for difficulty {difficulty}")
+            env = self.env_manager.get_or_create_env(difficulty)
+            
+            for episode in range(episodes_per_difficulty):
+                print(f"Episode {episode+1}/{episodes_per_difficulty}")
+                obs, infos = env.reset()
+                done = False
+                episode_prompts = []
+                episode_completions = []
+                episode_rewards = []
+                episode_format_checks = []
+                episode_success = False  # Track if this episode was completed successfully
                 
-                # Initialize episode
-                episode = Episode(difficulty, self.config.max_steps)
+                while not done and len(episode_prompts) < self.config.max_steps:
+                    # Get valid actions
+                    valid_actions = [
+                        a for a in infos["admissible_commands"]
+                        if a.lower() not in ['inventory', 'look']
+                    ]
+                    
+                    # Format prompt
+                    current_room = self.agent._get_room_name(obs)
+                    prompt = self.agent.format_prompt(obs, valid_actions, current_room)
+                    
+                    # Get action from agent
+                    action, action_info = self.agent.get_action(
+                        env, obs, infos, valid_actions, len(episode_prompts)
+                    )
+                    
+                    # Get model's raw completion - ensure everything is on the same device
+                    inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+                    with torch.no_grad():
+                        outputs = self.model.generate(
+                            **inputs,
+                            max_new_tokens=128,
+                            min_length=20,
+                            num_beams=1,  # Use greedy decoding for data collection
+                            return_dict_in_generate=True,
+                            output_scores=True,
+                        )
+                    
+                    completion = self.tokenizer.decode(outputs.sequences[0], skip_special_tokens=False)
+                    completion = completion.replace("<pad>", "").strip()
+                    
+                    # Take action in environment
+                    next_obs, reward, done, next_infos = env.step(action)
+                    
+                    # Check if episode was completed successfully
+                    if done and reward > 0:
+                        episode_success = True
+                    
+                    # Store format check result but DON'T modify the reward here
+                    # We'll handle format rewards in the reward_function
+                    format_check = self.agent.true_state.get('format_check_passed', True)
+                    episode_format_checks.append(format_check)
+                    
+                    # Store data
+                    episode_prompts.append(prompt)
+                    episode_completions.append(completion)
+                    episode_rewards.append(reward)  # Store the raw environment reward
+                    
+                    # Update for next step
+                    obs, infos = next_obs, next_infos
+                    self.agent.update_state_after_action(obs, reward, done, next_infos)
+                
+                # Process episode rewards (compute returns)
+                returns = self._compute_returns(episode_rewards, gamma=0.99)
+                
+                # Add to overall dataset
+                all_prompts.extend(episode_prompts)
+                all_completions.extend(episode_completions)
+                all_rewards.extend(returns)
+                all_format_checks.extend(episode_format_checks)
+                
+                # Add episode completion status for each step in this episode
+                all_episode_completions.extend([episode_success] * len(episode_prompts))
+        
+        # Create dataset
+        dataset_dict = {
+            "prompt": all_prompts,
+            "completion": all_completions,
+            "reward": all_rewards,
+            "episode_completion": all_episode_completions,
+            "format_check": all_format_checks
+        }
+        
+        return Dataset.from_dict(dataset_dict)
+    
+    def _compute_returns(self, rewards, gamma=0.99):
+        """Compute discounted returns"""
+        returns = []
+        G = 0
+        for r in reversed(rewards):
+            G = r + gamma * G
+            returns.insert(0, G)
+        return returns
+    
+    def reward_function(self, completions, ground_truth=None, prompts=None, format_checks=None, **kwargs):
+        """Custom reward function for GRPO
+        
+        Args:
+            completions: List of model outputs
+            ground_truth: List of episode completion statuses (True if episode was completed successfully)
+            prompts: List of input prompts (optional)
+            format_checks: List of format check results from data collection
+        """
+        rewards = []
+        
+        for i, completion in enumerate(completions):
+            # Check format of the current completion
+            format_check_result = self.agent.check_format(completion)
+            
+            # Base reward for format adherence - use values from config
+            if format_check_result["has_command_tags"] and format_check_result["has_room_tags"]:
+                format_reward = self.config.format_success_reward
+            else:
+                format_reward = self.config.format_failure_penalty
+                
+            # Episode completion reward (if ground truth is provided)
+            episode_reward = 0.0
+            if ground_truth is not None and i < len(ground_truth):
+                episode_reward = self.config.episode_completion_reward if ground_truth[i] else 0.0
+                
+            # Combine rewards
+            total_reward = format_reward + episode_reward
+            
+            rewards.append(total_reward)
+            
+        return rewards
+    
+    def train(self):
+        """Train the model using GRPO"""
+        # Collect gameplay data
+        train_dataset = self.collect_gameplay_data()
+        
+        # Initialize GRPO trainer
+        trainer = GRPOTrainer(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            args=self.grpo_config,
+            train_dataset=train_dataset,
+            reward_funcs=self.reward_function,
+            # Pass episode completion status as ground truth
+            ground_truth_key="episode_completion",
+            # Pass format check results
+            format_checks_key="format_check"
+        )
+        
+        # Train the model
+        trainer.train()
+        
+        # Save the final model
+        trainer.save_model(self.config.checkpoint_dir + "/final_model")
+        self.tokenizer.save_pretrained(self.config.checkpoint_dir + "/final_model")
+        
+    def evaluate(self, difficulties=None, episodes_per_difficulty=3):
+        """Evaluate the trained model"""
+        if difficulties is None:
+            difficulties = [1, 5, 10, 15]
+            
+        results = {}
+        
+        # Load the latest model
+        self.agent.model = self.model
+        self.agent.tokenizer = self.tokenizer
+        
+        for difficulty in difficulties:
+            success_count = 0
+            total_reward = 0
+            total_steps = 0
+            
+            for _ in range(episodes_per_difficulty):
                 env = self.env_manager.get_or_create_env(difficulty)
                 obs, infos = env.reset()
                 done = False
+                episode_reward = 0
+                steps = 0
                 
-                # Play episode
-                for step in range(self.config.max_steps):
-                    if done:
-                        break
-                        
+                while not done and steps < self.config.max_steps:
                     valid_actions = [
                         a for a in infos["admissible_commands"]
                         if a.lower() not in ['inventory', 'look']
                     ]
                     
-                    # Get action from agent
-                    action, mcts_stats = self.agent.get_action(
-                        env,
-                        obs,
-                        infos,
-                        valid_actions,
-                        step
-                    )
-                    
-                    if action is None:
-                        print("DEBUG - Agent returned None action (terminal state)")
-                        break
-                    
-                    # Take action and update agent's state
+                    action, _ = self.agent.get_action(env, obs, infos, valid_actions, steps)
                     next_obs, reward, done, next_infos = env.step(action)
-                    self.agent.update_state_after_action(next_obs, reward, done, next_infos)
                     
-                    # Store step
-                    episode.add_step(
-                        state={
-                            'observation': obs,
-                            'current_room': self.agent._get_room_name(obs),
-                            'history': episode.actions.copy(),
-                            'done': done
-                        },
-                        action=action,
-                        reward=reward,
-                        valid_actions=valid_actions,
-                        mcts_stats=mcts_stats
-                    )
+                    episode_reward += reward
+                    steps += 1
                     
-                    if done:
-                        episode.success = (reward > 0)
-                        if episode.success:
-                            success_count += 1
-                        print(f"DEBUG - Episode finished: success={episode.success}")
-                        break
-                        
                     obs, infos = next_obs, next_infos
+                    self.agent.update_state_after_action(obs, reward, done, next_infos)
                 
-                # Compute returns and add to buffer
-                episode.compute_returns()
-                self.buffer.add_episode(episode)
-    
-    def train_networks(self, num_batches):
-        """Train networks on collected experience"""
-        print("\nTraining networks...")
-        self.agent.policy_network.train()
-        self.agent.value_network.train()
-        self.agent.room_prediction_network.train()
-        
-        total_policy_loss = 0
-        total_value_loss = 0
-        total_room_loss = 0
-        
-        for batch_num in range(num_batches):
-            # Sample batch of episodes
-            episodes = self.buffer.sample_batch(self.config.training_config.batch_size)
-            if not episodes:
-                continue
-                
-            # Convert episodes to training format
-            batch_data = [
-                ep.to_training_format(self.agent.text_processor)
-                for ep in episodes
-            ]
+                total_reward += episode_reward
+                total_steps += steps
+                if episode_reward > 0:
+                    success_count += 1
             
-            # Zero gradients
-            self.agent.optimizer.zero_grad()
-            
-            # Compute losses
-            policy_loss = self._compute_policy_loss(batch_data)
-            value_loss = self._compute_value_loss(batch_data)
-            room_loss = self._compute_room_prediction_loss(batch_data)
-            
-            # Combined loss
-            total_loss = (
-                policy_loss +
-                self.config.training_config.value_loss_weight * value_loss +
-                self.config.training_config.room_loss_weight * room_loss
-            )
-            
-            # Backward pass and optimize
-            total_loss.backward()
-            self.agent.optimizer.step()
-            
-            # Track metrics
-            total_policy_loss += policy_loss.item()
-            total_value_loss += value_loss.item()
-            total_room_loss += room_loss.item()
-            
-            if (batch_num + 1) % 10 == 0:
-                print(f"Batch {batch_num + 1}/{num_batches}")
-                print(f"Policy loss: {total_policy_loss / (batch_num + 1):.4f}")
-                print(f"Value loss: {total_value_loss / (batch_num + 1):.4f}")
-                print(f"Room loss: {total_room_loss / (batch_num + 1):.4f}")
-        
-        # Store metrics
-        self.metrics['policy_loss'].append(total_policy_loss / num_batches)
-        self.metrics['value_loss'].append(total_value_loss / num_batches)
-        self.metrics['room_loss'].append(total_room_loss / num_batches)
-        
-        # Set networks back to eval mode
-        self.agent.policy_network.eval()
-        self.agent.value_network.eval()
-        self.agent.room_prediction_network.eval()
-    
-    def evaluate(self, num_episodes=10):
-        """Evaluate agent on current difficulty window"""
-        print("\nEvaluating agent...")
-        results = {}
-        
-        for difficulty in self.current_difficulties:
-            env = self.env_manager.get_or_create_env(difficulty)
-            success_count = 0
-            
-            for _ in range(num_episodes):
-                obs, infos = env.reset()
-                done = False
-                
-                while not done:
-                    valid_actions = [
-                        a for a in infos["admissible_commands"]
-                        if a.lower() not in ['inventory', 'look']
-                    ]
-                    
-                    action, _ = self.agent.get_action(env, obs, infos, valid_actions)
-                    obs, reward, done, infos = env.step(action)
-                    self.agent.update_state_after_action(obs, reward, done, infos)
-
-                    
-                    if done and reward > 0:
-                        success_count += 1
-            
-            results[difficulty] = success_count / num_episodes
-            print(f"Difficulty {difficulty} success rate: {results[difficulty]:.2f}")
+            results[difficulty] = {
+                "success_rate": success_count / episodes_per_difficulty,
+                "avg_reward": total_reward / episodes_per_difficulty,
+                "avg_steps": total_steps / episodes_per_difficulty
+            }
             
         return results
-    
-    def train(self, num_epochs):
-        """Main training loop"""
-        print("Starting training...")
-        self.initialize_environments()
-        
-        for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch + 1}/{num_epochs}")
-            
-            # Collect experience
-            self.collect_experience()
-            
-            # Train networks
-            self.train_networks(self.config.training_config.batches_per_epoch)
-            
-            # Evaluate
-            if (epoch + 1) % self.config.training_config.eval_frequency == 0:
-                results = self.evaluate()
-                
-                # Store metrics
-                for diff, rate in results.items():
-                    self.metrics[f'eval_success_rate_diff_{diff}'].append(rate)
-                
-                # Save checkpoint
-                self.save_checkpoint(f"checkpoint_epoch_{epoch + 1}.pt")
-            
-            # Consider advancing difficulty window
-            if self.should_advance_difficulty():
-                self.advance_difficulty_window()
-    
-    def should_advance_difficulty(self):
-        """Check if we should advance to harder difficulties"""
-        if len(self.metrics['eval_success_rate_diff_' + str(min(self.current_difficulties))]) < 3:
-            return False
-            
-        # Get last 3 evaluation results for easiest difficulty
-        recent_results = self.metrics['eval_success_rate_diff_' + str(min(self.current_difficulties))][-3:]
-        return all(r >= self.config.training_config.advance_threshold for r in recent_results)
-    
-    def advance_difficulty_window(self):
-        """Move difficulty window up"""
-        print("\nAdvancing difficulty window...")
-        old_min = min(self.current_difficulties)
-        old_max = max(self.current_difficulties)
-        
-        # Update current difficulties
-        self.current_difficulties = range(
-            old_min + 1,
-            old_min + 1 + self.config.training_config.window_size
-        )
-        
-        # Initialize new environments
-        for diff in self.current_difficulties:
-            if diff > old_max:
-                self.env_manager.get_or_create_env(diff)
-    
-    def save_checkpoint(self, filename):
-        """Save training state"""
-        torch.save({
-            'agent_state': self.agent.state_dict(),
-            'optimizer_state': self.agent.optimizer.state_dict(),
-            'buffer_state': self.buffer.get_stats(),
-            'metrics': dict(self.metrics),
-            'current_difficulties': self.current_difficulties,
-            'config': self.config
-        }, filename)
-        print(f"\nSaved checkpoint to {filename}")

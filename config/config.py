@@ -23,24 +23,10 @@ class GameType(Enum):
     COINS = "coins"
 
 
-
-@dataclass
-class MCTSConfig:
-    n_simulations: int = 10
-    c_puct: float = 1.0  # Exploration constant for UCB
-    temperature: float = 1.0  # Temperature for action selection
-    min_temperature: float = 0.1
-    max_temperature: float = 2.0
-    dirichlet_alpha: float = 0.3  # Optional: for adding noise to root prior
-    dirichlet_epsilon: float = 0.25  # Optional: noise weight at root node
-    discount_factor: float = 0.99  # For value backup
-    exploration_bonus: float = 0.5  # Bonus for discovering predicted unseen rooms
-    prediction_weight: float = 0.2  # Weight for room prediction confidence in action selection
-
 @dataclass
 class ModelConfig:
     # Pretrained model settings
-    model_name: str = "distilroberta-base"
+    model_name: str = "google/flan-t5-base"
     freeze_obs_base: bool = True
     unfreeze_last_n_obs_layers: int = 2
 
@@ -174,11 +160,9 @@ class TextWorldConfig:
     def __init__(self,
                  game_config: GameConfig,
                  model_config: ModelConfig,
-                 mcts_config: MCTSConfig,
                  sft_config: SFTConfig = None):  # Add SFTConfig as optional parameter
         self.game_config = game_config
         self.model_config = model_config
-        self.mcts_config = mcts_config
         self.sft_config = sft_config or SFTConfig()  # Use default if not provided
 
         self.excluded_actions = ["look", "inventory"]
@@ -257,14 +241,11 @@ def get_game_config(
     )
     
     model_config = ModelConfig()
-    mcts_config = MCTSConfig()
     #training_config = TrainingConfig()
     
     return TextWorldConfig(
         game_config=game_config,
-        model_config=model_config,
-        mcts_config=mcts_config,
-        #training_config=training_config
+        model_config=model_config
     )
 def create_all_games():
     """Create all game variants with different reward and goal types"""

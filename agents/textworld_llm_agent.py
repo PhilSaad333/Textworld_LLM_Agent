@@ -3,7 +3,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import re
 
 class TextWorldLLMAgent:
-    def __init__(self, config, training_mode=False, model_path=None):
+    def __init__(self, config, training_mode=False, model_path=None, use_map=False):
         """
         Initialize LLM-based TextWorld agent
         
@@ -11,9 +11,15 @@ class TextWorldLLMAgent:
             config: Configuration object containing model settings
             training_mode: If True, enables batch processing and disables debug output
             model_path: Optional path to a fine-tuned model checkpoint
+            use_map: If True, use the map tool to track room connections
         """
         self.config = config
         self.training_mode = training_mode
+        self.use_map = use_map
+        
+        # Initialize map tool if enabled
+        if self.use_map:
+            self.map_tool = MapTool()
         
         # Verify config has required attributes
         if not hasattr(config, 'game_config'):
@@ -94,6 +100,10 @@ class TextWorldLLMAgent:
         self.last_known_room = None
         self.action_room_history = [] if not self.training_mode else None
         self.true_state = {'step_count': 0}  # Initialize step count
+        
+        # Reset map tool if enabled
+        if self.use_map:
+            self.map_tool = MapTool()
 
     def parse_goal(self, initial_obs):
         """Extract goal from initial observation"""
@@ -215,13 +225,21 @@ class TextWorldLLMAgent:
         # Get inventory if available
         inventory_str = self.true_state.get('inventory', "No inventory information available")
         
+        # Get map representation if enabled
+        map_str = ""
+        if self.use_map and hasattr(self, 'map_tool'):
+            # Update map with current room if this is the first observation
+            if self.map_tool.current_room is None:
+                self.map_tool.update(room, clean_obs)
+            map_str = f"\nMap:\n{self.map_tool.get_text_representation()}"
+        
         prompt = f"""You are playing a text adventure game. Analyze this game state and give a response formatted as requested:
 
 Game State:
 Goal: {self.goal if self.goal else "Unknown"}
 Location: {room}
 Observation: {clean_obs}
-Inventory: {inventory_str}
+Inventory: {inventory_str}{map_str}
 Previous actions:
 {history_str}
 Currently available actions: {filtered_actions}
@@ -256,12 +274,19 @@ Your response:"""
             if step == 0:
                 self.reset()
                 
+            # Get current room
+            current_room = self._get_room_name(obs)
+            
+            # Update map if enabled and this is the first step
+            if self.use_map and step == 0:
+                self.map_tool.update(current_room, clean_obs)
+            
             # Get action with up to 3 attempts
             max_attempts = 3 if not self.training_mode else 1
             format_failures = 0
             
             for attempt in range(max_attempts):
-                prompt = self.format_prompt(obs, valid_actions, self._get_room_name(obs))
+                prompt = self.format_prompt(obs, valid_actions, current_room)
                 
                 inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
                 outputs = self.model.generate(
@@ -277,9 +302,6 @@ Your response:"""
                 full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
                 # Remove <pad> token if present
                 full_response = full_response.replace("<pad>", "").strip()
-                
-                if not self.training_mode:
-                    print(f"\nDEBUG - Model full response:\n{full_response}")
                 
                 # Check format using the check_format function
                 format_check = check_format(full_response)
@@ -300,6 +322,11 @@ Your response:"""
                             'format_failures': format_failures,
                             'predicted_room': predicted_room
                         })
+                        
+                        # After getting a valid action, update the map
+                        if self.use_map and action in valid_actions:
+                            # Map will be updated in update_state_after_action
+                            pass
                         
                         return action, {"predicted_room": predicted_room, "format_check": format_check}
                     else:
@@ -384,18 +411,19 @@ Your response:"""
 
     def update_state_after_action(self, obs, reward, done, infos):
         """Update agent's state after an action is taken"""
-        print("DEBUG - Updated agent state:")
-        print(f"  Step: {self.true_state.get('step_count', 0)}")
-        print(f"  Current room: {self._get_room_name(obs)}")
-        print(f"  History: {self.true_state.get('history', [])}")
-        print(f"  Done: {done}")
+        # Update step count
+        self.true_state['step_count'] = self.true_state.get('step_count', 0) + 1
         
-        self.true_state.update({
-            'observation': obs,
-            'infos': infos,
-            'done': done,
-            'last_reward': reward
-        })
+        # Update inventory if available
+        if 'inventory' in infos:
+            self.true_state['inventory'] = infos['inventory']
+            
+        # Update map if enabled
+        if self.use_map and len(self.action_room_history) > 0:
+            current_room = self._get_room_name(obs)
+            last_action = self.action_room_history[-1][1]
+            clean_obs = self._clean_observation(obs)
+            self.map_tool.update(current_room, clean_obs, last_action)
 
     def analyze_goals_by_difficulty(self, env_manager, max_difficulty=30):
         """Analyze goals for different difficulty levels"""
@@ -523,3 +551,41 @@ def check_format(text):
         "command": command,
         "room": room
     }
+
+class MapTool:
+    def __init__(self):
+        self.rooms = {}  # room_name -> {description, connections}
+        self.current_room = None
+    
+    def update(self, room_name, description, last_action=None):
+        # Add room if not seen before
+        if room_name not in self.rooms:
+            self.rooms[room_name] = {"description": description, "connections": {}}
+        
+        # If we moved from another room, update connections
+        if self.current_room and last_action and last_action.startswith("go "):
+            direction = last_action.split(" ")[1]
+            opposite = self._get_opposite_direction(direction)
+            
+            # Update connections both ways
+            self.rooms[self.current_room]["connections"][direction] = room_name
+            self.rooms[room_name]["connections"][opposite] = self.current_room
+        
+        self.current_room = room_name
+    
+    def _get_opposite_direction(self, direction):
+        opposites = {"north": "south", "south": "north", "east": "west", "west": "east", 
+                    "up": "down", "down": "up", "northeast": "southwest", "southwest": "northeast",
+                    "northwest": "southeast", "southeast": "northwest"}
+        return opposites.get(direction, "unknown")
+    
+    def get_text_representation(self):
+        # Generate text representation of the map
+        result = "Known Rooms:\n"
+        for room, data in self.rooms.items():
+            connections = [f"{dir} → {dest}" for dir, dest in data["connections"].items()]
+            connections_str = ", ".join(connections) if connections else "no known exits"
+            result += f"- {room} [{connections_str}]\n"
+        
+        result += f"\nCurrent Location: {self.current_room}"
+        return result

@@ -256,7 +256,7 @@ class GameRunner:
 
 
 # Function to set up and run games
-def setup_and_run_games(model_path, difficulties=None, games_per_difficulty=1):
+def setup_and_run_games(model_path, difficulties=None, games_per_difficulty=1, use_map=False):
     """
     Set up the environment, agent, and run games
     
@@ -264,6 +264,7 @@ def setup_and_run_games(model_path, difficulties=None, games_per_difficulty=1):
         model_path: Path to the fine-tuned model
         difficulties: List of difficulty levels to play
         games_per_difficulty: Number of games to play per difficulty level
+        use_map: If True, use the map tool to track room connections
     """
     from environment.task_env import TaskEnvManager, TaskConfig
     from agents.textworld_llm_agent import TextWorldLLMAgent
@@ -287,7 +288,7 @@ def setup_and_run_games(model_path, difficulties=None, games_per_difficulty=1):
     env_manager = TaskEnvManager(task_config)
     
     # Create agent with fine-tuned model
-    agent = TextWorldLLMAgent(config, model_path=model_path)
+    agent = TextWorldLLMAgent(config, model_path=model_path, use_map=use_map)
     
     # Create game runner
     log_dir = "/content/drive/MyDrive/textworld_logs/games"
