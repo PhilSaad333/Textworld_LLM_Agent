@@ -125,12 +125,20 @@ class TextWorldRLTrainer:
         all_rewards = []
         all_episode_completions = []  # Track if the episode was completed successfully
         all_format_checks = []  # Track format check results
+        all_input_token_counts = []  # Track input token counts
+        all_output_token_counts = []  # Track output token counts
         
         # Use the class device attribute instead of checking model parameters
         print(f"Using device for data collection: {self.device}")
         
         # Ensure model is on the correct device before starting
         self.model = self.model.to(self.device)
+        
+        # Track token statistics
+        total_input_tokens = 0
+        total_output_tokens = 0
+        max_input_tokens = 0
+        max_output_tokens = 0
         
         for difficulty in difficulties:
             print(f"Collecting data for difficulty {difficulty}")
@@ -144,6 +152,8 @@ class TextWorldRLTrainer:
                 episode_completions = []
                 episode_rewards = []
                 episode_format_checks = []
+                episode_input_token_counts = []
+                episode_output_token_counts = []
                 episode_success = False  # Track if this episode was completed successfully
                 
                 while not done and len(episode_prompts) < self.config.max_steps:
@@ -156,6 +166,16 @@ class TextWorldRLTrainer:
                     # Format prompt
                     current_room = self.agent._get_room_name(obs)
                     prompt = self.agent.format_prompt(obs, valid_actions, current_room)
+                    
+                    # Count input tokens
+                    input_tokens = self.tokenizer.encode(prompt)
+                    input_token_count = len(input_tokens)
+                    total_input_tokens += input_token_count
+                    max_input_tokens = max(max_input_tokens, input_token_count)
+                    
+                    # Log warning if input is close to or exceeds max length
+                    if input_token_count >= self.grpo_config.max_prompt_length - 10:
+                        print(f"⚠️ Input length ({input_token_count} tokens) close to max ({self.grpo_config.max_prompt_length})")
                     
                     # Get action from agent
                     action, action_info = self.agent.get_action(
@@ -177,6 +197,16 @@ class TextWorldRLTrainer:
                     completion = self.tokenizer.decode(outputs.sequences[0], skip_special_tokens=False)
                     completion = completion.replace("<pad>", "").strip()
                     
+                    # Count output tokens
+                    output_tokens = self.tokenizer.encode(completion)
+                    output_token_count = len(output_tokens)
+                    total_output_tokens += output_token_count
+                    max_output_tokens = max(max_output_tokens, output_token_count)
+                    
+                    # Log warning if output is close to max length
+                    if output_token_count >= 120:  # Close to max_new_tokens=128
+                        print(f"⚠️ Output length ({output_token_count} tokens) close to max (128)")
+                    
                     # Take action in environment
                     next_obs, reward, done, next_infos = env.step(action)
                     
@@ -193,6 +223,8 @@ class TextWorldRLTrainer:
                     episode_prompts.append(prompt)
                     episode_completions.append(completion)
                     episode_rewards.append(reward)  # Store the raw environment reward
+                    episode_input_token_counts.append(input_token_count)
+                    episode_output_token_counts.append(output_token_count)
                     
                     # Update for next step
                     obs, infos = next_obs, next_infos
@@ -206,9 +238,18 @@ class TextWorldRLTrainer:
                 all_completions.extend(episode_completions)
                 all_rewards.extend(returns)
                 all_format_checks.extend(episode_format_checks)
+                all_input_token_counts.extend(episode_input_token_counts)
+                all_output_token_counts.extend(episode_output_token_counts)
                 
                 # Add episode completion status for each step in this episode
                 all_episode_completions.extend([episode_success] * len(episode_prompts))
+        
+        # Print token statistics
+        print("\n===== Token Count Statistics =====")
+        print(f"Total samples: {len(all_prompts)}")
+        print(f"Input tokens - Total: {total_input_tokens}, Avg: {total_input_tokens/len(all_prompts):.1f}, Max: {max_input_tokens}")
+        print(f"Output tokens - Total: {total_output_tokens}, Avg: {total_output_tokens/len(all_completions):.1f}, Max: {max_output_tokens}")
+        print("=================================\n")
         
         # Create dataset
         dataset_dict = {
@@ -216,7 +257,9 @@ class TextWorldRLTrainer:
             "completion": all_completions,
             "reward": all_rewards,
             "episode_completion": all_episode_completions,
-            "format_check": all_format_checks
+            "format_check": all_format_checks,
+            "input_token_count": all_input_token_counts,
+            "output_token_count": all_output_token_counts
         }
         
         return Dataset.from_dict(dataset_dict)
@@ -240,6 +283,37 @@ class TextWorldRLTrainer:
             format_checks: List of format check results from data collection
         """
         rewards = []
+        
+        # Track token counts during training
+        if hasattr(self, 'token_tracking_step'):
+            self.token_tracking_step += 1
+        else:
+            self.token_tracking_step = 0
+            self.token_tracking_data = {
+                'steps': [],
+                'avg_output_tokens': [],
+                'max_output_tokens': []
+            }
+        
+        # Only log every 10 steps to avoid too much output
+        should_log = (self.token_tracking_step % 10 == 0)
+        
+        # Calculate token statistics for this batch
+        output_token_counts = [len(self.tokenizer.encode(completion)) for completion in completions]
+        avg_output_tokens = sum(output_token_counts) / len(output_token_counts)
+        max_output_tokens = max(output_token_counts)
+        
+        # Store for tracking
+        if should_log:
+            self.token_tracking_data['steps'].append(self.token_tracking_step)
+            self.token_tracking_data['avg_output_tokens'].append(avg_output_tokens)
+            self.token_tracking_data['max_output_tokens'].append(max_output_tokens)
+            print(f"\n[Step {self.token_tracking_step}] Output tokens - Avg: {avg_output_tokens:.1f}, Max: {max_output_tokens}")
+        
+        # Check for potential truncation
+        truncation_count = sum(1 for count in output_token_counts if count >= 120)  # Close to max_new_tokens
+        if truncation_count > 0 and should_log:
+            print(f"⚠️ {truncation_count}/{len(completions)} completions may be truncated (>= 120 tokens)")
         
         for i, completion in enumerate(completions):
             # Check format of the current completion
@@ -338,3 +412,36 @@ class TextWorldRLTrainer:
             }
             
         return results
+    
+    def plot_token_trends(self):
+        """Plot token count trends over training steps"""
+        try:
+            import matplotlib.pyplot as plt
+            
+            if not hasattr(self, 'token_tracking_data'):
+                print("No token tracking data available.")
+                return
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(self.token_tracking_data['steps'], self.token_tracking_data['avg_output_tokens'], 
+                     label='Avg Output Tokens', marker='o')
+            plt.plot(self.token_tracking_data['steps'], self.token_tracking_data['max_output_tokens'], 
+                     label='Max Output Tokens', marker='x')
+            
+            plt.axhline(y=128, color='r', linestyle='--', label='Max New Tokens Limit')
+            
+            plt.xlabel('Training Steps')
+            plt.ylabel('Token Count')
+            plt.title('Output Token Count Trends During Training')
+            plt.legend()
+            plt.grid(True)
+            
+            # Save the plot
+            plt.savefig(f"{self.config.checkpoint_dir}/token_trends.png")
+            print(f"Token trend plot saved to {self.config.checkpoint_dir}/token_trends.png")
+            
+            # Show the plot if in interactive environment
+            plt.show()
+            
+        except ImportError:
+            print("Matplotlib not available. Install with: pip install matplotlib")
