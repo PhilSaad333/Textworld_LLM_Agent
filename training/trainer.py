@@ -221,6 +221,7 @@ class TextWorldRLTrainer:
                         completion = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=False)
                         completion = completion.replace("<pad>", "").strip()
                         completions.append(completion)
+                        print(f"Completion {i+1}: {completion}")
                         
                         # Count output tokens
                         output_tokens = self.tokenizer.encode(completion)
