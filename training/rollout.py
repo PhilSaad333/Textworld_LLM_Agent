@@ -37,23 +37,30 @@ class Rollout:
         self.success = False
         
     def _clone_agent(self, agent):
-        """Create a copy of the agent for rollout"""
-        # Create a new agent with the same configuration
-        cloned_agent = type(agent)(agent.config, use_map=getattr(agent, 'use_map', False))
+        """Create a copy of the agent for rollout without reinitializing the model"""
+        # Create a new agent with training_mode=True to avoid loading a new model
+        cloned_agent = type(agent)(agent.config, training_mode=True, use_map=getattr(agent, 'use_map', False))
         
-        # Copy over the model, tokenizer, and device
-        cloned_agent.model = self.model
-        cloned_agent.tokenizer = self.tokenizer
+        # Directly set the model, tokenizer, and device from the existing agent
+        cloned_agent.model = self.model  # Use the model passed to the Rollout
+        cloned_agent.tokenizer = self.tokenizer  # Use the tokenizer passed to the Rollout
         cloned_agent.device = self.device
         
         # Copy the agent's state
+        if hasattr(agent, 'goal'):
+            cloned_agent.goal = agent.goal
+        if hasattr(agent, 'last_known_room'):
+            cloned_agent.last_known_room = agent.last_known_room
         if hasattr(agent, 'true_state'):
             cloned_agent.true_state = copy.deepcopy(agent.true_state)
         
         # Copy the map tool if it exists
         if hasattr(agent, 'map_tool') and agent.map_tool:
             cloned_agent.map_tool = copy.deepcopy(agent.map_tool)
-            
+        
+        # Set training_mode to False after initialization to ensure normal behavior
+        cloned_agent.training_mode = False
+        
         return cloned_agent
     
     def extract_action_from_completion(self, completion, valid_actions):
