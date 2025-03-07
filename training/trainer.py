@@ -229,6 +229,11 @@ class TextWorldRLTrainer:
                     for i in range(num_generations):
                         completion = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=False)
                         completion = completion.replace("<pad>", "").strip()
+                        
+                        # Ensure completion ends with EOS token
+                        if not completion.endswith(self.tokenizer.eos_token):
+                            completion += self.tokenizer.eos_token
+                        
                         completions.append(completion)
                         print(f"Completion {i+1}: {completion}")
                         
@@ -631,10 +636,31 @@ class TextWorldRLTrainer:
             else:
                 raise ValueError("No file path provided and no previous save found")
         
+        print(f"Loading gameplay data from {file_path}")
+        
         # Load data from JSON file
         with open(file_path, 'r') as f:
             data_dict = json.load(f)
-
+        
+        # Extract data
+        if "data" in data_dict:
+            # New format with data and metadata
+            dataset_dict = data_dict["data"]
+        else:
+            # Old format with direct data
+            dataset_dict = data_dict
+        
+        # Create dataset
+        dataset = Dataset.from_dict(dataset_dict)
+        
+        # Print dataset statistics
+        print(f"Loaded {len(dataset)} examples")
+        if "reward" in dataset.features:
+            rewards = dataset["reward"]
+            print(f"Reward min: {min(rewards)}, max: {max(rewards)}, avg: {sum(rewards)/len(rewards):.4f}")
+        
+        return dataset
+    
     def train(self, use_saved_data=False, data_path=None, save_model_path=None):
         """Train the model using GRPO
         
@@ -652,6 +678,19 @@ class TextWorldRLTrainer:
         # Import our custom trainer
         from training.custom_grpo_trainer import CustomGRPOTrainer
         
+        # Update GRPO config to disable wandb and ensure num_generations is set correctly
+        self.grpo_config.report_to = None  # Disable wandb to avoid API key prompt
+        
+        # Ensure num_generations is set to a value that divides the batch size evenly
+        batch_size = self.grpo_config.per_device_train_batch_size
+        if not hasattr(self.config, 'num_generations') or batch_size % self.config.num_generations != 0:
+            # Find the largest divisor of batch_size that's <= 4
+            for n_gen in range(min(4, batch_size), 0, -1):
+                if batch_size % n_gen == 0:
+                    self.config.num_generations = n_gen
+                    print(f"Setting num_generations to {n_gen} to ensure divisibility with batch size {batch_size}")
+                    break
+        
         # Initialize our custom GRPO trainer
         trainer = CustomGRPOTrainer(
             model=self.model,
@@ -664,8 +703,12 @@ class TextWorldRLTrainer:
         # Train the model
         trainer.train()
         
-        # Plot token trends
-        self.plot_token_trends()
-        
         # Save the model
-        self.save_model(save_model_path)
+        if save_model_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_model_path = os.path.join(self.grpo_config.output_dir, f"rl_model_{timestamp}")
+        
+        trainer.save_model(save_model_path)
+        print(f"Model saved to {save_model_path}")
+        
+        return save_model_path
