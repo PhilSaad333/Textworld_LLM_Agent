@@ -177,6 +177,10 @@ class TextWorldRLTrainer:
                 episode_data = []
                 action_history = []
 
+                # Reset the agent and initialize known_rooms
+                self.agent.reset()
+                self.agent.known_rooms = set()
+
                 while not done and len(episode_data) < self.config.max_steps:
                     # Get valid actions
                     valid_actions = [
@@ -347,12 +351,18 @@ class TextWorldRLTrainer:
                     action_history.append(action)
                     
                     # Check if episode was completed successfully
-                    if done and reward > 0:
-                        episode_success = True
+                    if done:
+                        episode_success = (reward > 0)
+                        
                     
                     # Update for next step
                     obs, infos = next_obs, next_infos
                     self.agent.update_state_after_action(obs, reward, done, next_infos)
+
+                    # Explicitly update known_rooms with the current room
+                    current_room = self.agent._get_room_name(next_obs)
+                    if current_room:
+                        self.agent.known_rooms.add(current_room)
                 
                 # Add episode data to all episodes
                 all_episode_data.append({

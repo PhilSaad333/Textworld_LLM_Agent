@@ -101,7 +101,7 @@ class TextWorldLLMAgent:
         """Reset agent state"""
         self.goal = None
         self.goals = [] if self.training_mode else None
-        self.known_rooms = set()
+        self.known_rooms = set()  # This will track all rooms seen in the episode
         self.last_known_room = None
         self.action_room_history = [] if not self.training_mode else None
         self.true_state = {'step_count': 0}  # Initialize step count
@@ -173,6 +173,9 @@ class TextWorldLLMAgent:
         if room_match:
             room_name = room_match.group(1).strip()
             self.last_known_room = room_name
+            # Add to known rooms set
+            if hasattr(self, 'known_rooms'):
+                self.known_rooms.add(room_name)
             return room_name
             
         # If we can't find a new room name, return the last known room

@@ -51,6 +51,8 @@ class Rollout:
             cloned_agent.goal = agent.goal
         if hasattr(agent, 'last_known_room'):
             cloned_agent.last_known_room = agent.last_known_room
+        if hasattr(agent, 'known_rooms'):
+            cloned_agent.known_rooms = copy.deepcopy(agent.known_rooms)
         if hasattr(agent, 'true_state'):
             cloned_agent.true_state = copy.deepcopy(agent.true_state)
         
@@ -91,7 +93,7 @@ class Rollout:
         action_info["room_prediction"] = room_prediction
         
         # Update format check status
-        self.format_check_passed = action_info["format_check_passed"]
+        self.format_check_passed = action_info.get("format_check_passed", False)
         
         # Count tokens in the completion (safely)
         try:
@@ -149,18 +151,30 @@ class Rollout:
                     # Check if room prediction is correct
                     if action_info.get('room_prediction') and self.action is not None:
                         try:
-                            # Create a copy of the environment to check room prediction
-                            # without affecting the main rollout
+                            # Create a copy of the environment to test if this action leads to a terminal state
                             temp_env = copy.deepcopy(self.env)
                             
-                            # Take the action to see what room we end up in
+                            # Replay action history
+                            temp_obs, temp_infos = temp_env.reset()
+                            for past_action in self.action_history:
+                                temp_obs, _, _, temp_infos = temp_env.step(past_action)
+                            
+                            # Take the action to see what happens
                             temp_obs, _, temp_done, _ = temp_env.step(self.action)
                             
-                            # If the action ends the game, we can't verify room prediction
+                            # Get the predicted room
+                            predicted_room = action_info.get('room_prediction', '').lower()
+                            
+                            # If the action ends the game, we can't verify room prediction in the usual way
                             if temp_done:
-                                # For terminal states, we can't verify room prediction
-                                self.room_prediction_correct = False
+                                # For terminal states, we'll consider "Unknown" or "None" to be correct
+                                if predicted_room in ["unknown", "none"]:
+                                    self.room_prediction_correct = True
+                                else:
+                                    # For other predictions, we can't verify, so default to False
+                                    self.room_prediction_correct = False
                             else:
+                                # Get the actual next room
                                 next_room = self.agent._get_room_name(temp_obs)
                                 
                                 # Handle the case where next_room is None (room didn't change)
@@ -168,12 +182,22 @@ class Rollout:
                                     # If room name not found in observation, assume we're still in the same room
                                     next_room = self.agent.last_known_room
                                 
-                                # Now check if the prediction is correct (safely)
-                                if next_room is not None and action_info.get('room_prediction') is not None:
-                                    self.room_prediction_correct = (next_room.lower() == action_info.get('room_prediction').lower())
+                                # Special handling for "new room" prediction
+                                if predicted_room == "new room":
+                                    # Check if this room has been seen before in the agent's known_rooms
+                                    if hasattr(self.agent, 'known_rooms') and next_room is not None:
+                                        # If the room is not in known_rooms, then "new room" is correct
+                                        self.room_prediction_correct = next_room not in self.agent.known_rooms
+                                    else:
+                                        # If we can't verify, default to False
+                                        self.room_prediction_correct = False
                                 else:
-                                    # If either is None, we can't verify the prediction
-                                    self.room_prediction_correct = False
+                                    # For specific room predictions, check exact match
+                                    if next_room is not None:
+                                        self.room_prediction_correct = (next_room.lower() == predicted_room)
+                                    else:
+                                        # If we can't verify, default to False
+                                        self.room_prediction_correct = False
                             
                             # Clean up the temporary environment
                             temp_env.close()
