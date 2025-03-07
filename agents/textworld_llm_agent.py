@@ -246,7 +246,7 @@ Currently available actions: {filtered_actions}
 
 Generate a *concise* response in the following format:
 
-A) Reasoning about the game state, which actions seem relevant, and what those actions might achieve. 
+A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve. 
 
 B) Then, state your chosen action - Make sure it is in the available actions list:
 Therefore, I choose: <command>[exact action]</command>
@@ -304,7 +304,7 @@ Your response:"""
                 full_response = full_response.replace("<pad>", "").strip()
                 
                 # Check format using the check_format function
-                format_check = check_format(full_response)
+                format_check = self.check_format(full_response)
                 
                 if format_check["has_command_tags"] and format_check["has_room_tags"]:
                     action = format_check["command"]
@@ -397,7 +397,7 @@ Your response:"""
                 response = response.replace("<pad>", "").strip()
                 
                 # Check format
-                format_check = check_format(response)
+                format_check = self.check_format(response)
                 format_checks.append(format_check)
                 
                 if format_check["has_command_tags"] and format_check["command"] in valid_acts:
@@ -584,43 +584,43 @@ Your response:"""
         
         return action, {"format_check_passed": action_info.get('format_check_passed', False)}
 
-def check_format(text):
-    """
-    Check if the text follows the expected format with command and room tags.
-    
-    Args:
-        text: Text to check
+    def check_format(self, text):
+        """
+        Check if the text follows the expected format with command and room tags.
         
-    Returns:
-        dict: Format check results including:
-            - has_command_tags: Whether text has <command> tags
-            - has_room_tags: Whether text has <room> tags
-            - command: Extracted command (or "None" if not found)
-            - room: Extracted room (or "None" if not found)
-    """
-    # Check for A/B/C format (not strict about line starts)
-    has_section_a = bool(re.search(r'A\)', text, re.IGNORECASE))
-    has_section_b = bool(re.search(r'B\)', text, re.IGNORECASE))
-    has_section_c = bool(re.search(r'C\)', text, re.IGNORECASE))
-    
-    # Check for command and room tags
-    has_command_tags = '<command>' in text and '</command>' in text
-    has_room_tags = '<room>' in text and '</room>' in text
-    
-    # Extract command and room, handling the extra spaces
-    command_match = re.search(r"<command>\s*(.+?)\s*</command>", text)
-    command = command_match.group(1).strip() if command_match else "None"
-    
-    room_match = re.search(r"<room>\s*(.+?)\s*</room>", text)
-    room = room_match.group(1).strip() if room_match else "None"
-    
-    return {
-        "format_correct": has_section_a and has_section_b and has_section_c,
-        "has_command_tags": has_command_tags,
-        "has_room_tags": has_room_tags,
-        "command": command,
-        "room": room
-    }
+        Args:
+            text: Text to check
+            
+        Returns:
+            dict: Format check results including:
+                - has_command_tags: Whether text has <command> tags
+                - has_room_tags: Whether text has <room> tags
+                - command: Extracted command (or "None" if not found)
+                - room: Extracted room (or "None" if not found)
+        """
+        # Check for A/B/C format (not strict about line starts)
+        has_section_a = bool(re.search(r'A\)', text, re.IGNORECASE))
+        has_section_b = bool(re.search(r'B\)', text, re.IGNORECASE))
+        has_section_c = bool(re.search(r'C\)', text, re.IGNORECASE))
+        
+        # Check for command and room tags
+        has_command_tags = '<command>' in text and '</command>' in text
+        has_room_tags = '<room>' in text and '</room>' in text
+        
+        # Extract command and room, handling the extra spaces
+        command_match = re.search(r"<command>\s*(.+?)\s*</command>", text)
+        command = command_match.group(1).strip() if command_match else "None"
+        
+        room_match = re.search(r"<room>\s*(.+?)\s*</room>", text)
+        room = room_match.group(1).strip() if room_match else "None"
+        
+        return {
+            "format_correct": has_section_a and has_section_b and has_section_c,
+            "has_command_tags": has_command_tags,
+            "has_room_tags": has_room_tags,
+            "command": command,
+            "room": room
+        }
 
 class MapTool:
     def __init__(self):
