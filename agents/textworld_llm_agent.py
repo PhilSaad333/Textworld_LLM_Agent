@@ -246,7 +246,7 @@ Currently available actions: {filtered_actions}
 
 Generate a *concise* response in the following format:
 
-A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve.
+A) Reasoning about the game state, which actions seem relevant, and what those actions might achieve. 
 
 B) Then, state your chosen action - Make sure it is in the available actions list:
 Therefore, I choose: <command>[exact action]</command>
@@ -510,9 +510,79 @@ Your response:"""
             self.true_state = {}
         self.true_state['step_count'] = step_count
 
+    def extract_action_from_completion(self, completion, valid_actions):
+        """Extract action and format check from a completion"""
+        # Check format
+        format_check_result = self.check_format(completion)
+        format_check_passed = format_check_result["has_command_tags"] and format_check_result["has_room_tags"]
+        
+        # Extract command
+        command = None
+        if format_check_result["has_command_tags"]:
+            command_match = re.search(r'<command>(.*?)</command>', completion, re.DOTALL)
+            if command_match:
+                command = command_match.group(1).strip()
+        
+        # Find the closest valid action if needed
+        action = None
+        if command:
+            if command in valid_actions:
+                action = command
+            else:
+                # Try to find the closest match
+                closest_match = None
+                highest_similarity = 0
+                for valid_action in valid_actions:
+                    similarity = self._similarity(command.lower(), valid_action.lower())
+                    if similarity > highest_similarity:
+                        highest_similarity = similarity
+                        closest_match = valid_action
+                
+                if highest_similarity > 0.7:  # Threshold for accepting a match
+                    action = closest_match
+        
+        return {
+            "action": action,
+            "format_check_passed": format_check_passed,
+            "command": command
+        }
 
+    def _similarity(self, a, b):
+        """Calculate string similarity using Levenshtein distance"""
+        # Simple implementation - you might want to use a library like python-Levenshtein for better performance
+        distance = sum(1 for x, y in zip(a, b) if x != y) + abs(len(a) - len(b))
+        max_len = max(len(a), len(b))
+        return 1 - (distance / max_len) if max_len > 0 else 1
 
-
+    def get_action_fast(self, env, obs, infos, valid_actions, step=0):
+        """Get next action using LLM with simplified generation settings for rollouts."""
+        clean_obs = self._clean_observation(obs)
+        current_room = self._get_room_name(obs)
+        
+        prompt = self.format_prompt(obs, valid_actions, current_room)
+        
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=128,
+            num_beams=1,  # Use greedy decoding
+            temperature=0.7,
+            do_sample=False,  # No sampling for deterministic results
+            early_stopping=True
+        )
+        
+        full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+        full_response = full_response.replace("<pad>", "").strip()
+        
+        # Extract action using existing method
+        action_info = self.extract_action_from_completion(full_response, valid_actions)
+        action = action_info.get('action')
+        
+        # Fallback to first valid action if needed
+        if not action or action not in valid_actions:
+            action = valid_actions[0]
+        
+        return action, {"format_check_passed": action_info.get('format_check_passed', False)}
 
 def check_format(text):
     """

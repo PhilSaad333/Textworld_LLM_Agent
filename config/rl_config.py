@@ -10,7 +10,7 @@ class RLConfig:
     learning_rate: float = 1e-5
     batch_size: int = 8
     gradient_accumulation_steps: int = 4
-    max_output_length: int = 128  # Used as max_completion_length in GRPOConfig
+    max_output_length: int = 256  # Used as max_completion_length in GRPOConfig
     max_input_length: int = 512  # Used as max_prompt_length in GRPOConfig
     num_epochs: int = 3
     
@@ -20,14 +20,15 @@ class RLConfig:
     checkpoint_dir: str = "./checkpoints/rl"
     
     # GRPO specific parameters
+    num_generations: int = 4  # Number of completions to generate per prompt
     beta: float = 0.1  # KL penalty coefficient
     # Removed target_kl and kl_penalty as they're not used by GRPOConfig
-    use_vllm: bool = False  # Use vLLM for faster generation
+    use_vllm: bool = True  # Use vLLM for faster generation
     
     # Reward parameters
-    format_success_reward: float = 0.5  # Reward for correct format
+    gamma: float = 0.99  # Discount factor
     format_failure_penalty: float = -0.2  # Penalty for incorrect format
-    episode_completion_reward: float = 2.0  # Reward for completing an episode
+    room_prediction_penalty: float = -0.1  # Penalty for incorrect room prediction
     
     # Data collection parameters
     difficulties: list = None  # List of difficulties to collect data from

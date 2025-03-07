@@ -6,6 +6,11 @@ from environment.task_env import TaskEnvManager, TaskConfig
 from agents.textworld_llm_agent import TextWorldLLMAgent
 import numpy as np
 from config.config import GameConfig, RewardType, GoalType, GameType, get_game_config
+from training.rollout import Rollout
+import json
+import os
+from datetime import datetime
+from google.colab import drive
 
 class TextWorldRLTrainer:
     def __init__(self, rl_config, main_config=None, model_path=None, use_map=True):
@@ -112,57 +117,54 @@ class TextWorldRLTrainer:
             use_vllm=rl_config.use_vllm if hasattr(rl_config, 'use_vllm') else False,
             temperature=rl_config.temperature if hasattr(rl_config, 'temperature') else 0.7,
         )
-        
+
     def collect_gameplay_data(self, difficulties=None, episodes_per_difficulty=5):
         """Collect gameplay data for training"""
         if difficulties is None:
             difficulties = self.config.difficulties if hasattr(self.config, 'difficulties') and self.config.difficulties else [1, 5, 10]
             
         episodes_per_difficulty = self.config.episodes_per_difficulty if hasattr(self.config, 'episodes_per_difficulty') else episodes_per_difficulty
-            
-        all_prompts = []
-        all_completions = []
-        all_rewards = []
-        all_episode_completions = []  # Track if the episode was completed successfully
-        all_format_checks = []  # Track format check results
-        all_input_token_counts = []  # Track input token counts
-        all_output_token_counts = []  # Track output token counts
+
+        # Store episode data as a list of dictionaries
+        # Each dictionary has keys "prompt" "completions" and "rewards", where the values for "completions" and "rewards are a list of strings
+        all_episode_data = []
         
-        # Use the class device attribute instead of checking model parameters
-        print(f"Using device for data collection: {self.device}")
+        # Number of completions to generate per prompt
+        num_generations = self.config.num_generations if hasattr(self.config, 'num_generations') else 4
         
         # Ensure model is on the correct device before starting
         self.model = self.model.to(self.device)
-        
+
         # Track token statistics
         total_input_tokens = 0
         total_output_tokens = 0
         max_input_tokens = 0
         max_output_tokens = 0
-        
+
+        # Import the Rollout class
+        from training.rollout import Rollout
+
+        # Iterate over difficulties
         for difficulty in difficulties:
             print(f"Collecting data for difficulty {difficulty}")
+            # Create environment for this difficulty
             env = self.env_manager.get_or_create_env(difficulty)
-            
+
             for episode in range(episodes_per_difficulty):
                 print(f"Episode {episode+1}/{episodes_per_difficulty}")
                 obs, infos = env.reset()
                 done = False
-                episode_prompts = []
-                episode_completions = []
-                episode_rewards = []
-                episode_format_checks = []
-                episode_input_token_counts = []
-                episode_output_token_counts = []
-                episode_success = False  # Track if this episode was completed successfully
-                
-                while not done and len(episode_prompts) < self.config.max_steps:
+                episode_success = False
+                episode_data = []
+                action_history = []
+
+                while not done and len(episode_data) < self.config.max_steps:
                     # Get valid actions
                     valid_actions = [
                         a for a in infos["admissible_commands"]
                         if a.lower() not in ['inventory', 'look']
                     ]
-                    
+
                     # Format prompt
                     current_room = self.agent._get_room_name(obs)
                     prompt = self.agent.format_prompt(obs, valid_actions, current_room)
@@ -172,119 +174,197 @@ class TextWorldRLTrainer:
                     input_token_count = len(input_tokens)
                     total_input_tokens += input_token_count
                     max_input_tokens = max(max_input_tokens, input_token_count)
-                    
+
                     # Log warning if input is close to or exceeds max length
                     if input_token_count >= self.grpo_config.max_prompt_length - 10:
                         print(f"⚠️ Input length ({input_token_count} tokens) close to max ({self.grpo_config.max_prompt_length})")
+
+                    # Generate G completions
+                    completions = []
+                    completion_token_counts = []
                     
-                    # Get action from agent
-                    action, action_info = self.agent.get_action(
-                        env, obs, infos, valid_actions, len(episode_prompts)
-                    )
-                    
-                    # Get model's raw completion - ensure everything is on the same device
+                    # Prepare inputs for generation
                     inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+                    
+                    # Generate G completions
                     with torch.no_grad():
                         outputs = self.model.generate(
                             **inputs,
-                            max_new_tokens=128,
+                            max_new_tokens=self.grpo_config.max_completion_length,
                             min_length=20,
-                            num_beams=1,  # Use greedy decoding for data collection
+                            num_return_sequences=num_generations,
+                            num_beams=num_generations,  # Use beam search to get diverse completions
                             return_dict_in_generate=True,
                             output_scores=True,
                         )
                     
-                    completion = self.tokenizer.decode(outputs.sequences[0], skip_special_tokens=False)
-                    completion = completion.replace("<pad>", "").strip()
+                    # Process completions
+                    for i in range(num_generations):
+                        completion = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=False)
+                        completion = completion.replace("<pad>", "").strip()
+                        completions.append(completion)
+                        
+                        # Count output tokens
+                        output_tokens = self.tokenizer.encode(completion)
+                        output_token_count = len(output_tokens)
+                        completion_token_counts.append(output_token_count)
+                        total_output_tokens += output_token_count
+                        max_output_tokens = max(max_output_tokens, output_token_count)
+                        
+                        # Log warning if output is close to max length
+                        if output_token_count >= self.grpo_config.max_completion_length - 10:
+                            print(f"⚠️ Output length ({output_token_count} tokens) close to max ({self.grpo_config.max_completion_length})")
                     
-                    # Count output tokens
-                    output_tokens = self.tokenizer.encode(completion)
-                    output_token_count = len(output_tokens)
-                    total_output_tokens += output_token_count
-                    max_output_tokens = max(max_output_tokens, output_token_count)
+                    # Do rollouts for each completion to get rewards
+                    rollout_rewards = []
                     
-                    # Log warning if output is close to max length
-                    if output_token_count >= 120:  # Close to max_new_tokens=128
-                        print(f"⚠️ Output length ({output_token_count} tokens) close to max (128)")
+                    for completion_idx, completion in enumerate(completions):
+                        # Create a rollout for this completion
+                        rollout = Rollout(
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            device=self.device,
+                            env=env,
+                            agent=self.agent,
+                            action_history=action_history,
+                            completion=completion
+                        )
+                        
+                        # Run the rollout
+                        max_rollout_steps = self.config.max_steps - len(action_history) if hasattr(self.config, 'max_steps') else 10
+                        rollout.run(max_steps=max_rollout_steps, gamma=self.config.gamma if hasattr(self.config, 'gamma') else 0.99)
+                        
+                        # Compute total reward including format and room prediction bonuses
+                        total_reward = rollout.compute_total_reward(self.config)
+                        rollout_rewards.append(total_reward)
                     
-                    # Take action in environment
+                    # Store step data
+                    step_data = {
+                        "prompt": prompt,
+                        "completions": completions,
+                        "rewards": rollout_rewards,
+                        "completion_token_counts": completion_token_counts
+                    }
+                    
+                    episode_data.append(step_data)
+                    
+                    # Choose action to take in the environment
+                    # Option 1: Choose the completion with the highest reward
+                    best_completion_idx = rollout_rewards.index(max(rollout_rewards))
+                    chosen_completion = completions[best_completion_idx]
+                    
+                    # Create a rollout for the chosen completion to get the action
+                    chosen_rollout = Rollout(
+                        model=self.model,
+                        tokenizer=self.tokenizer,
+                        device=self.device,
+                        env=env,
+                        agent=self.agent,
+                        action_history=action_history,
+                        completion=chosen_completion
+                    )
+                    
+                    # Extract the action (without running the rollout)
+                    valid_actions = [
+                        a for a in infos["admissible_commands"]
+                        if a.lower() not in ['inventory', 'look']
+                    ]
+                    action_info = chosen_rollout.extract_action_from_completion(chosen_completion, valid_actions)
+                    action = action_info.get('action', None)
+                    
+                    # If action is invalid, choose a random valid action
+                    if action is None or action not in valid_actions:
+                        action = np.random.choice(valid_actions)
+                    
+                    # Reset environment to current state
+                    obs, infos = env.reset()
+                    
+                    # Replay action history to get to current state
+                    for past_action in action_history:
+                        obs, _, _, infos = env.step(past_action)
+                    
+                    # Take the chosen action
                     next_obs, reward, done, next_infos = env.step(action)
+                    
+                    # Add action to history
+                    action_history.append(action)
                     
                     # Check if episode was completed successfully
                     if done and reward > 0:
                         episode_success = True
                     
-                    # Store format check result but DON'T modify the reward here
-                    # We'll handle format rewards in the reward_function
-                    format_check = self.agent.true_state.get('format_check_passed', True)
-                    episode_format_checks.append(format_check)
-                    
-                    # Store data
-                    episode_prompts.append(prompt)
-                    episode_completions.append(completion)
-                    episode_rewards.append(reward)  # Store the raw environment reward
-                    episode_input_token_counts.append(input_token_count)
-                    episode_output_token_counts.append(output_token_count)
-                    
                     # Update for next step
                     obs, infos = next_obs, next_infos
                     self.agent.update_state_after_action(obs, reward, done, next_infos)
                 
-                # Process episode rewards (compute returns)
-                returns = self._compute_returns(episode_rewards, gamma=0.99)
-                
-                # Add to overall dataset
-                all_prompts.extend(episode_prompts)
-                all_completions.extend(episode_completions)
-                all_rewards.extend(returns)
-                all_format_checks.extend(episode_format_checks)
-                all_input_token_counts.extend(episode_input_token_counts)
-                all_output_token_counts.extend(episode_output_token_counts)
-                
-                # Add episode completion status for each step in this episode
-                all_episode_completions.extend([episode_success] * len(episode_prompts))
+                # Add episode data to all episodes
+                all_episode_data.append({
+                    "steps": episode_data,
+                    "success": episode_success,
+                    "difficulty": difficulty
+                })
         
         # Print token statistics
         print("\n===== Token Count Statistics =====")
-        print(f"Total samples: {len(all_prompts)}")
-        print(f"Input tokens - Total: {total_input_tokens}, Avg: {total_input_tokens/len(all_prompts):.1f}, Max: {max_input_tokens}")
-        print(f"Output tokens - Total: {total_output_tokens}, Avg: {total_output_tokens/len(all_completions):.1f}, Max: {max_output_tokens}")
+        print(f"Total episodes: {len(all_episode_data)}")
+        print(f"Input tokens - Total: {total_input_tokens}, Max: {max_input_tokens}")
+        print(f"Output tokens - Total: {total_output_tokens}, Max: {max_output_tokens}")
         print("=================================\n")
+        
+        # Convert to dataset format expected by GRPO
+        # We need to flatten the episode data into a list of prompts, completions, and rewards
+        all_prompts = []
+        all_completions = []
+        all_rewards = []
+        all_completion_token_counts = []
+        
+        for episode in all_episode_data:
+            for step in episode["steps"]:
+                # For each step, add G entries to the dataset (one for each completion)
+                for i in range(len(step["completions"])):
+                    all_prompts.append(step["prompt"])
+                    all_completions.append(step["completions"][i])
+                    all_rewards.append(step["rewards"][i])
+                    all_completion_token_counts.append(step["completion_token_counts"][i])
         
         # Create dataset
         dataset_dict = {
             "prompt": all_prompts,
             "completion": all_completions,
             "reward": all_rewards,
-            "episode_completion": all_episode_completions,
-            "format_check": all_format_checks,
-            "input_token_count": all_input_token_counts,
-            "output_token_count": all_output_token_counts
+            "completion_token_count": all_completion_token_counts
         }
+        
+        # Store the raw episode data for potential future use
+        self.episode_data = all_episode_data
+        
+        # After collecting data
+        avg_completion_tokens = sum(sum(step["completion_token_counts"]) / len(step["completion_token_counts"]) 
+                                   for step in episode_data) / len(episode_data)
+        max_completion_tokens = max(max(step["completion_token_counts"]) for step in episode_data)
+
+        print(f"Average completion tokens: {avg_completion_tokens:.1f}")
+        print(f"Maximum completion tokens: {max_completion_tokens}")
+
+        # Check for potential truncation
+        if max_completion_tokens > self.config.max_output_length * 0.9:
+            print(f"WARNING: Some completions are approaching the maximum length ({max_completion_tokens}/{self.config.max_output_length})")
         
         return Dataset.from_dict(dataset_dict)
     
-    def _compute_returns(self, rewards, gamma=0.99):
-        """Compute discounted returns"""
-        returns = []
-        G = 0
-        for r in reversed(rewards):
-            G = r + gamma * G
-            returns.insert(0, G)
-        return returns
     
-    def reward_function(self, completions, ground_truth=None, prompts=None, format_checks=None, **kwargs):
+    def reward_function(self, completions, reward=None, **kwargs):
         """Custom reward function for GRPO
         
         Args:
             completions: List of model outputs
-            ground_truth: List of episode completion statuses (True if episode was completed successfully)
-            prompts: List of input prompts (optional)
-            format_checks: List of format check results from data collection
-        """
-        rewards = []
+            reward: Pre-computed rewards from rollouts (passed from dataset)
+            **kwargs: Additional arguments passed from the dataset
         
-        # Track token counts during training
+        Returns:
+            List of rewards for each completion
+        """
+        # Track token counts during training (keep this part for monitoring)
         if hasattr(self, 'token_tracking_step'):
             self.token_tracking_step += 1
         else:
@@ -311,52 +391,151 @@ class TextWorldRLTrainer:
             print(f"\n[Step {self.token_tracking_step}] Output tokens - Avg: {avg_output_tokens:.1f}, Max: {max_output_tokens}")
         
         # Check for potential truncation
-        truncation_count = sum(1 for count in output_token_counts if count >= 120)  # Close to max_new_tokens
+        truncation_count = sum(1 for count in output_token_counts if count >= self.config.max_output_length * 0.9)
         if truncation_count > 0 and should_log:
-            print(f"⚠️ {truncation_count}/{len(completions)} completions may be truncated (>= 120 tokens)")
+            print(f"⚠️ {truncation_count}/{len(completions)} completions may be truncated (>= {self.config.max_output_length * 0.9} tokens)")
         
-        for i, completion in enumerate(completions):
+        # If we have pre-computed rewards, use them directly
+        if reward is not None:
+            return reward
+        
+        # Fallback: If for some reason we don't have pre-computed rewards,
+        # compute basic format rewards (this should rarely happen)
+        rewards = []
+        for completion in completions:
             # Check format of the current completion
             format_check_result = self.agent.check_format(completion)
             
-            # Base reward for format adherence - use values from config
+            # Apply format penalty only
             if format_check_result["has_command_tags"] and format_check_result["has_room_tags"]:
-                format_reward = self.config.format_success_reward
+                format_reward = 0.0  # No reward for correct format
             else:
-                format_reward = self.config.format_failure_penalty
-                
-            # Episode completion reward (if ground truth is provided)
-            episode_reward = 0.0
-            if ground_truth is not None and i < len(ground_truth):
-                episode_reward = self.config.episode_completion_reward if ground_truth[i] else 0.0
-                
-            # Combine rewards
-            total_reward = format_reward + episode_reward
+                format_reward = self.config.format_failure_penalty  # Penalty for incorrect format
             
-            rewards.append(total_reward)
-            
+            rewards.append(format_reward)
+        
         return rewards
     
-    def train(self):
-        """Train the model using GRPO"""
+    def collect_and_save_gameplay_data(self, difficulties=None, episodes_per_difficulty=5, save_path=None):
+        """Collect gameplay data and save it to a JSON file
+        
+        Args:
+            difficulties: List of difficulty levels to collect data from
+            episodes_per_difficulty: Number of episodes to collect per difficulty
+            save_path: Path to save the JSON file (default: Google Drive)
+            
+        Returns:
+            Path to the saved JSON file
+        """
         # Collect gameplay data
-        train_dataset = self.collect_gameplay_data()
+        dataset = self.collect_gameplay_data(difficulties, episodes_per_difficulty)
+        
+        # Convert dataset to a serializable format
+        data_dict = {
+            "data": {
+                "prompt": dataset["prompt"],
+                "completion": dataset["completion"],
+                "reward": dataset["reward"],
+                "completion_token_count": dataset["completion_token_count"]
+            },
+            "metadata": {
+                "difficulties": difficulties,
+                "episodes_per_difficulty": episodes_per_difficulty,
+                "model": self.model.config.name_or_path,
+                "timestamp": datetime.now().isoformat(),
+                "config": {k: v for k, v in vars(self.config).items() if not callable(v) and not k.startswith('__')}
+            }
+        }
+        
+        # Create a timestamp for the filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Determine save path
+        if save_path is None:
+            # Mount Google Drive if not already mounted
+            try:
+                drive_mounted = os.path.exists('/content/drive')
+                if not drive_mounted:
+                    drive.mount('/content/drive')
+                
+                # Create directory if it doesn't exist
+                save_dir = '/content/drive/MyDrive/textworld_rl_data'
+                os.makedirs(save_dir, exist_ok=True)
+                
+                # Create filename with timestamp
+                save_path = f"{save_dir}/gameplay_data_{timestamp}.json"
+            except Exception as e:
+                print(f"Error mounting Google Drive: {e}")
+                # Fallback to local storage
+                save_path = f"/content/gameplay_data_{timestamp}.json"
+        
+        # Save data to JSON file
+        with open(save_path, 'w') as f:
+            json.dump(data_dict, f)
+        
+        print(f"Gameplay data saved to {save_path}")
+        
+        # Store the path for later use
+        self.last_saved_data_path = save_path
+        
+        return save_path
+    
+    def load_gameplay_data(self, file_path=None):
+        """Load gameplay data from a JSON file
+        
+        Args:
+            file_path: Path to the JSON file (if None, uses the last saved path)
+            
+        Returns:
+            Dataset object with the loaded data
+        """
+        # Use last saved path if no path provided
+        if file_path is None:
+            if hasattr(self, 'last_saved_data_path'):
+                file_path = self.last_saved_data_path
+            else:
+                raise ValueError("No file path provided and no previous save found")
+        
+        # Load data from JSON file
+        with open(file_path, 'r') as f:
+            data_dict = json.load(f)
+        
+        # Convert to Dataset
+        from datasets import Dataset
+        dataset = Dataset.from_dict(data_dict["data"])
+        
+        print(f"Loaded gameplay data from {file_path}")
+        print(f"Dataset contains {len(dataset)} examples")
+        
+        return dataset
+    
+    def train(self, use_saved_data=False, data_path=None):
+        """Train the model using GRPO
+        
+        Args:
+            use_saved_data: Whether to use saved gameplay data instead of collecting new data
+            data_path: Path to the saved gameplay data (if None, uses the last saved path)
+        """
+        # Get training data
+        if use_saved_data:
+            train_dataset = self.load_gameplay_data(data_path)
+        else:
+            train_dataset = self.collect_gameplay_data()
         
         # Initialize GRPO trainer
         trainer = GRPOTrainer(
             model=self.model,
-            tokenizer=self.tokenizer,
+            reward_funcs=self.reward_function,
             args=self.grpo_config,
             train_dataset=train_dataset,
-            reward_funcs=self.reward_function,
-            # Pass episode completion status as ground truth
-            ground_truth_key="episode_completion",
-            # Pass format check results
-            format_checks_key="format_check"
+            processing_class=self.tokenizer,
         )
         
         # Train the model
         trainer.train()
+        
+        # Plot token trends
+        self.plot_token_trends()
         
         # Save the final model
         trainer.save_model(self.config.checkpoint_dir + "/final_model")
