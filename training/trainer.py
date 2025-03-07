@@ -217,6 +217,9 @@ class TextWorldRLTrainer:
                             min_length=20,
                             num_return_sequences=num_generations,
                             num_beams=num_generations,  # Use beam search to get diverse completions
+                            do_sample=True,  # Set to True to use temperature
+                            temperature=0.7,
+                            early_stopping=True,
                             return_dict_in_generate=True,
                             output_scores=True,
                         )

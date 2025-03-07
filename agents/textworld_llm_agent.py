@@ -168,6 +168,9 @@ class TextWorldLLMAgent:
 
     def _get_room_name(self, obs):
         """Extract room name from observation"""
+        if obs is None:
+            return self.last_known_room or "Unknown Room"
+        
         # Look for room name between -= and =- on its own line
         room_match = re.search(r'^-=\s*([^=]+?)\s*=-\s*$', obs, re.MULTILINE)
         if room_match:
@@ -533,6 +536,13 @@ Your response:"""
 
     def extract_action_from_completion(self, completion, valid_actions):
         """Extract action and format check from a completion"""
+        if completion is None:
+            return {
+                "action": valid_actions[0] if valid_actions else "look",
+                "format_check_passed": False,
+                "command": None
+            }
+        
         # Check format
         format_check_result = self.check_format(completion)
         format_check_passed = format_check_result["has_command_tags"] and format_check_result["has_room_tags"]
@@ -619,6 +629,15 @@ Your response:"""
                 - command: Extracted command (or "None" if not found)
                 - room: Extracted room (or "None" if not found)
         """
+        if text is None:
+            return {
+                "format_correct": False,
+                "has_command_tags": False,
+                "has_room_tags": False,
+                "command": "None",
+                "room": "None"
+            }
+        
         # Check for A/B/C format (not strict about line starts)
         has_section_a = bool(re.search(r'A\)', text, re.IGNORECASE))
         has_section_b = bool(re.search(r'B\)', text, re.IGNORECASE))
@@ -629,11 +648,17 @@ Your response:"""
         has_room_tags = '<room>' in text and '</room>' in text
         
         # Extract command and room, handling the extra spaces
-        command_match = re.search(r"<command>\s*(.+?)\s*</command>", text)
-        command = command_match.group(1).strip() if command_match else "None"
+        command = "None"
+        if has_command_tags:
+            command_match = re.search(r"<command>\s*(.+?)\s*</command>", text)
+            if command_match:
+                command = command_match.group(1).strip()
         
-        room_match = re.search(r"<room>\s*(.+?)\s*</room>", text)
-        room = room_match.group(1).strip() if room_match else "None"
+        room = "None"
+        if has_room_tags:
+            room_match = re.search(r"<room>\s*(.+?)\s*</room>", text)
+            if room_match:
+                room = room_match.group(1).strip()
         
         return {
             "format_correct": has_section_a and has_section_b and has_section_c,
