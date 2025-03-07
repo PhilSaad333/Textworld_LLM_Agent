@@ -33,7 +33,7 @@ class Rollout:
         self.steps = 0
         self.done = False
         self.format_check_passed = False
-        self.room_prediction_correct = False
+        self.room_prediction_correct = None
         self.success = False
         
     def _clone_agent(self, agent):
@@ -148,64 +148,12 @@ class Rollout:
                     # Store the completion token count
                     self.completion_token_count = action_info.get('completion_token_count', 0)
                     
-                    # Check if room prediction is correct
-                    if action_info.get('room_prediction') and self.action is not None:
-                        try:
-                            # Create a copy of the environment to test if this action leads to a terminal state
-                            temp_env = copy.deepcopy(self.env)
-                            
-                            # Replay action history
-                            temp_obs, temp_infos = temp_env.reset()
-                            for past_action in self.action_history:
-                                temp_obs, _, _, temp_infos = temp_env.step(past_action)
-                            
-                            # Take the action to see what happens
-                            temp_obs, _, temp_done, _ = temp_env.step(self.action)
-                            
-                            # Get the predicted room
-                            predicted_room = action_info.get('room_prediction', '').lower()
-                            
-                            # If the action ends the game, we can't verify room prediction in the usual way
-                            if temp_done:
-                                # For terminal states, we'll consider "Unknown" or "None" to be correct
-                                if predicted_room in ["unknown", "none"]:
-                                    self.room_prediction_correct = True
-                                else:
-                                    # For other predictions, we can't verify, so default to False
-                                    self.room_prediction_correct = False
-                            else:
-                                # Get the actual next room
-                                next_room = self.agent._get_room_name(temp_obs)
-                                
-                                # Handle the case where next_room is None (room didn't change)
-                                if next_room is None:
-                                    # If room name not found in observation, assume we're still in the same room
-                                    next_room = self.agent.last_known_room
-                                
-                                # Special handling for "new room" prediction
-                                if predicted_room == "new room":
-                                    # Check if this room has been seen before in the agent's known_rooms
-                                    if hasattr(self.agent, 'known_rooms') and next_room is not None:
-                                        # If the room is not in known_rooms, then "new room" is correct
-                                        self.room_prediction_correct = next_room not in self.agent.known_rooms
-                                    else:
-                                        # If we can't verify, default to False
-                                        self.room_prediction_correct = False
-                                else:
-                                    # For specific room predictions, check exact match
-                                    if next_room is not None:
-                                        self.room_prediction_correct = (next_room.lower() == predicted_room)
-                                    else:
-                                        # If we can't verify, default to False
-                                        self.room_prediction_correct = False
-                            
-                            # Clean up the temporary environment
-                            temp_env.close()
-                            
-                        except Exception as e:
-                            print(f"Error checking room prediction: {e}")
-                            # If there's an error, just continue without checking room prediction
-                            self.room_prediction_correct = False
+                    # Store the predicted room but don't verify it yet
+                    self.predicted_room = action_info.get('room_prediction', '').lower()
+                    
+                    # We'll verify room prediction after taking the action
+                    self.room_prediction_correct = None
+                    
                 except Exception as e:
                     print(f"Error extracting action from completion: {e}")
                     self.action = None
@@ -224,15 +172,47 @@ class Rollout:
                 self.reward = -1.0
             
             # Take the first action
-            obs, reward, done, infos = self.env.step(self.action)
+            next_obs, reward, done, next_infos = self.env.step(self.action)
             self.reward += reward
             self.steps += 1
             
-            # If done after first action, return the reward
+            # Verify room prediction only if the episode doesn't end
+            if not done and hasattr(self, 'predicted_room') and self.predicted_room:
+                # Get the actual next room
+                next_room = self.agent._get_room_name(next_obs)
+                
+                # Handle the case where next_room is None (room didn't change)
+                if next_room is None:
+                    # If room name not found in observation, assume we're still in the same room
+                    next_room = self.agent.last_known_room
+                
+                # Special handling for "new room" prediction
+                if self.predicted_room == "new room":
+                    # Check if this room has been seen before in the agent's known_rooms
+                    if hasattr(self.agent, 'known_rooms') and next_room is not None:
+                        # If the room is not in known_rooms, then "new room" is correct
+                        self.room_prediction_correct = next_room not in self.agent.known_rooms
+                    else:
+                        # If we can't verify, default to False
+                        self.room_prediction_correct = False
+                else:
+                    # For specific room predictions, check exact match
+                    if next_room is not None:
+                        self.room_prediction_correct = (next_room.lower() == self.predicted_room)
+                    else:
+                        # If we can't verify, default to False
+                        self.room_prediction_correct = False
+            
+            # If done after first action, return the reward without room prediction penalty
             if done:
                 self.done = True
                 self.success = (reward > 0)
+                # Skip room prediction verification for terminal states
+                self.room_prediction_correct = None
                 return self.reward
+            
+            # Update observation and infos for the next step
+            obs, infos = next_obs, next_infos
             
             # Continue the rollout
             while not done and self.steps < max_steps:
@@ -286,10 +266,9 @@ class Rollout:
         if not self.format_check_passed:
             total_reward += config.format_failure_penalty
         
-        # Room prediction penalty (only apply penalty, no reward for correct prediction)
+        # Room prediction penalty - only apply if we were able to verify and it's incorrect
         if hasattr(config, 'room_prediction_penalty') and config.room_prediction_penalty < 0:
-            # Check if we have a room prediction and it's incorrect
-            if hasattr(self, 'room_prediction_correct') and not self.room_prediction_correct:
+            if hasattr(self, 'room_prediction_correct') and self.room_prediction_correct is not None and not self.room_prediction_correct:
                 total_reward += config.room_prediction_penalty
         
         return total_reward
