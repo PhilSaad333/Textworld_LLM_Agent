@@ -58,23 +58,43 @@ class TextWorldRLTrainer:
         if model_path and model_path.endswith('.pt'):
             # Load from .pt file
             print(f"Loading model from PyTorch checkpoint: {model_path}")
-            checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-            
-            # Initialize the model with the base architecture
-            self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-            
-            # Resize model embeddings to match tokenizer with special tokens
-            self.model.resize_token_embeddings(len(self.tokenizer))
-            
-            # Check the structure of the checkpoint
-            if "model_state_dict" in checkpoint:
-                # This is a training checkpoint with multiple components
-                print("Detected training checkpoint format. Loading model_state_dict.")
-                self.model.load_state_dict(checkpoint["model_state_dict"])
-            else:
-                # This is just a model state dict
-                print("Detected model state dict format.")
+            try:
+                # Try loading with default settings
+                checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+                
+                # Initialize the model with the base architecture
+                self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+                
+                # Resize model embeddings to match tokenizer with special tokens
+                self.model.resize_token_embeddings(len(self.tokenizer))
+                
+                # Check the structure of the checkpoint
+                if "model_state_dict" in checkpoint:
+                    # This is a training checkpoint with multiple components
+                    print("Detected training checkpoint format. Loading model_state_dict.")
+                    self.model.load_state_dict(checkpoint["model_state_dict"])
+                else:
+                    # This is just a model state dict
+                    print("Detected model state dict format.")
+                    self.model.load_state_dict(checkpoint)
+                    
+            except (AttributeError, ModuleNotFoundError) as e:
+                # Handle the case where the checkpoint references classes that don't exist
+                print(f"Error loading checkpoint with full settings: {e}")
+                print("Trying to load with weights_only=True...")
+                
+                # Try loading with weights_only=True to avoid pickle issues
+                checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=True)
+                
+                # Initialize the model with the base architecture
+                self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+                
+                # Resize model embeddings to match tokenizer with special tokens
+                self.model.resize_token_embeddings(len(self.tokenizer))
+                
+                # Load the state dict
                 self.model.load_state_dict(checkpoint)
+                print("Successfully loaded model weights.")
         else:
             # Load from Hugging Face model directory or hub
             print(f"Loading model from directory or hub: {model_path or 'google/flan-t5-base'}")
