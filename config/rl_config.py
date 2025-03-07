@@ -27,7 +27,7 @@ class RLConfig:
     
     # Reward parameters
     gamma: float = 0.99  # Discount factor
-    format_failure_penalty: float = -0.2  # Penalty for incorrect format
+    format_failure_penalty: float = -0.7  # Penalty for incorrect format
     room_prediction_penalty: float = -0.1  # Penalty for incorrect room prediction
     
     # Data collection parameters

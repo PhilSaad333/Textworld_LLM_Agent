@@ -470,18 +470,24 @@ class TextWorldRLTrainer:
         if reward is not None:
             return reward
         
-        # Fallback: If for some reason we don't have pre-computed rewards,
-        # compute basic format rewards (this should rarely happen)
+        # FALLBACK ONLY: This code only runs if pre-computed rewards are missing
+        # This should match the logic in Rollout.compute_total_reward
+        print("WARNING: Using fallback reward calculation. Pre-computed rewards not found.")
         rewards = []
         for completion in completions:
             # Check format of the current completion
             format_check_result = self.agent.check_format(completion)
             
-            # Apply format penalty only
-            if format_check_result["has_command_tags"] and format_check_result["has_room_tags"]:
-                format_reward = 0.0  # No reward for correct format
-            else:
-                format_reward = self.config.format_failure_penalty  # Penalty for incorrect format
+            # Apply format penalty ONLY for command and room tags
+            format_reward = 0.0  # Start with no penalty
+            
+            # Check command tags
+            if not format_check_result["has_command_tags"]:
+                format_reward += self.config.format_failure_penalty / 2  # Half penalty for missing command tags
+            
+            # Check room tags
+            if not format_check_result["has_room_tags"]:
+                format_reward += self.config.format_failure_penalty / 2  # Half penalty for missing room tags
             
             rewards.append(format_reward)
         
@@ -580,12 +586,13 @@ class TextWorldRLTrainer:
         
         return dataset
     
-    def train(self, use_saved_data=False, data_path=None):
+    def train(self, use_saved_data=False, data_path=None, save_model_path=None):
         """Train the model using GRPO
         
         Args:
             use_saved_data: Whether to use saved gameplay data instead of collecting new data
             data_path: Path to the saved gameplay data (if None, uses the last saved path)
+            save_model_path: Path to save the model after training (default: checkpoint_dir/rl_model_timestamp)
         """
         # Get training data
         if use_saved_data:
@@ -608,9 +615,8 @@ class TextWorldRLTrainer:
         # Plot token trends
         self.plot_token_trends()
         
-        # Save the final model
-        trainer.save_model(self.config.checkpoint_dir + "/final_model")
-        self.tokenizer.save_pretrained(self.config.checkpoint_dir + "/final_model")
+        # Save the model
+        self.save_model(save_model_path)
         
     def evaluate(self, difficulties=None, episodes_per_difficulty=3):
         """Evaluate the trained model"""
@@ -695,3 +701,123 @@ class TextWorldRLTrainer:
             
         except ImportError:
             print("Matplotlib not available. Install with: pip install matplotlib")
+
+    def save_model(self, save_path=None, save_training_state=True):
+        """Save the model and optionally training state
+        
+        Args:
+            save_path: Path to save the model (default: checkpoint_dir/rl_model_timestamp)
+            save_training_state: Whether to save training state data
+            
+        Returns:
+            Path to the saved model
+        """
+        # Create timestamp for filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Determine save path
+        if save_path is None:
+            save_path = f"{self.config.checkpoint_dir}/rl_model_{timestamp}"
+        
+        # Create directory if it doesn't exist
+        os.makedirs(save_path, exist_ok=True)
+        
+        # Save model and tokenizer
+        self.model.save_pretrained(save_path)
+        self.tokenizer.save_pretrained(save_path)
+        
+        print(f"Model and tokenizer saved to {save_path}")
+        
+        # Save training state if requested
+        if save_training_state:
+            training_state = {
+                "timestamp": timestamp,
+                "config": {k: v for k, v in vars(self.config).items() if not callable(v) and not k.startswith('__')},
+                "main_config": {k: v for k, v in vars(self.main_config).items() if not callable(v) and not k.startswith('__')} if self.main_config else None,
+            }
+            
+            # Add token tracking data if available
+            if hasattr(self, 'token_tracking_data'):
+                training_state["token_tracking_data"] = self.token_tracking_data
+            
+            # Add episode data if available
+            if hasattr(self, 'episode_data'):
+                # Only save summary to avoid huge files
+                episode_summary = []
+                for episode in self.episode_data:
+                    summary = {
+                        "difficulty": episode["difficulty"],
+                        "success": episode["success"],
+                        "num_steps": len(episode["steps"]),
+                        "avg_reward": sum(max(step["rewards"]) for step in episode["steps"]) / len(episode["steps"]) if episode["steps"] else 0
+                    }
+                    episode_summary.append(summary)
+                
+                training_state["episode_summary"] = episode_summary
+            
+            # Save training state to JSON file
+            with open(f"{save_path}/training_state.json", 'w') as f:
+                json.dump(training_state, f, indent=2)
+            
+            print(f"Training state saved to {save_path}/training_state.json")
+        
+        # Save a PyTorch checkpoint for compatibility with other code
+        torch.save(
+            self.model.state_dict(),
+            f"{save_path}/pytorch_model.pt"
+        )
+        print(f"PyTorch checkpoint saved to {save_path}/pytorch_model.pt")
+        
+        return save_path
+
+    def load_model(self, model_path):
+        """Load a saved model
+        
+        Args:
+            model_path: Path to the saved model
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print(f"Loading model from {model_path}...")
+            
+            # Check if this is a directory or a .pt file
+            if os.path.isdir(model_path):
+                # Load from Hugging Face format
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
+                self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            elif model_path.endswith('.pt'):
+                # Load from PyTorch checkpoint
+                checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+                
+                # Initialize the model with the base architecture
+                self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+                
+                # Resize model embeddings to match tokenizer with special tokens
+                special_tokens = {
+                    'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+                }
+                self.tokenizer.add_special_tokens(special_tokens)
+                self.model.resize_token_embeddings(len(self.tokenizer))
+                
+                # Load the state dict
+                self.model.load_state_dict(checkpoint)
+            else:
+                raise ValueError(f"Unsupported model path format: {model_path}")
+            
+            # Move model to device
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.model = self.model.to(self.device)
+            
+            # Update agent's model and tokenizer
+            self.agent.model = self.model
+            self.agent.tokenizer = self.tokenizer
+            self.agent.device = self.device
+            
+            print(f"Model loaded successfully to {self.device}")
+            return True
+            
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False

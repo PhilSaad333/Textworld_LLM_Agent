@@ -93,6 +93,9 @@ class Rollout:
         room_prediction = None
         try:
             format_check_result = self.agent.check_format(completion)
+            # Store the full format check result for more detailed reward calculation
+            self.format_check_result = format_check_result
+            
             if format_check_result["has_room_tags"]:
                 room_match = re.search(r'<room>(.*?)</room>', completion, re.DOTALL)
                 if room_match:
@@ -277,9 +280,23 @@ class Rollout:
         """Compute the total reward including format and room prediction penalties"""
         total_reward = self.reward  # Base reward from the environment
         
-        # Format penalty (only apply penalty, no reward for correct format)
-        if not self.format_check_passed:
-            total_reward += config.format_failure_penalty
+        # Format penalty - only apply for missing command or room tags
+        if hasattr(self, 'format_check_passed') and not self.format_check_passed:
+            # Check if we have more detailed format information
+            if hasattr(self, 'format_check_result'):
+                format_penalty = 0.0
+                
+                # Apply partial penalties based on what's missing
+                if not self.format_check_result.get("has_command_tags", False):
+                    format_penalty += config.format_failure_penalty / 2
+                
+                if not self.format_check_result.get("has_room_tags", False):
+                    format_penalty += config.format_failure_penalty / 2
+                    
+                total_reward += format_penalty
+            else:
+                # If we don't have detailed info, apply full penalty
+                total_reward += config.format_failure_penalty
         
         # Room prediction penalty - only apply if we were able to verify and it's incorrect
         if hasattr(config, 'room_prediction_penalty') and config.room_prediction_penalty < 0:
