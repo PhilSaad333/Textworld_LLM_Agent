@@ -1,6 +1,7 @@
 import re
 import copy
 import torch
+import random
 
 class Rollout:
     """Performs a rollout from a given state using a specific action"""
@@ -78,6 +79,15 @@ class Rollout:
         completion_token_count = len(self.tokenizer.encode(completion))
         action_info["completion_token_count"] = completion_token_count
         
+        # Ensure we have a valid action
+        if not action_info.get('action') and valid_actions:
+            # Try to find any valid action mentioned in the completion
+            for action in valid_actions:
+                if action.lower() in completion.lower():
+                    action_info['action'] = action
+                    print(f"Found valid action in completion: {action}")
+                    break
+        
         return action_info
     
     def run(self, max_steps=10, gamma=0.99):
@@ -112,71 +122,92 @@ class Rollout:
             self.completion_token_count = action_info.get('completion_token_count', 0)
             
             # Check if room prediction is correct
-            if action_info.get('room_prediction'):
-                # Take the action to see what room we end up in
-                temp_obs, _, temp_done, _ = self.env.step(self.action)
-                if not temp_done:
-                    next_room = self.agent._get_room_name(temp_obs)
+            if action_info.get('room_prediction') and self.action is not None:
+                try:
+                    # Take the action to see what room we end up in
+                    temp_obs, _, temp_done, _ = self.env.step(self.action)
+                    if not temp_done:
+                        next_room = self.agent._get_room_name(temp_obs)
+                        
+                        # Handle the case where next_room is None (room didn't change)
+                        if next_room is None:
+                            # If room name not found in observation, assume we're still in the same room
+                            next_room = self.agent.last_known_room
+                        
+                        # Now check if the prediction is correct (safely)
+                        if next_room is not None and action_info.get('room_prediction') is not None:
+                            self.room_prediction_correct = (next_room.lower() == action_info.get('room_prediction').lower())
+                        else:
+                            # If either is None, we can't verify the prediction
+                            self.room_prediction_correct = False
                     
-                    # Handle the case where next_room is None (room didn't change)
-                    if next_room is None:
-                        # If room name not found in observation, assume we're still in the same room
-                        next_room = self.agent.last_known_room
-                    
-                    # Now check if the prediction is correct (safely)
-                    if next_room is not None and action_info.get('room_prediction') is not None:
-                        self.room_prediction_correct = (next_room.lower() == action_info.get('room_prediction').lower())
-                    else:
-                        # If either is None, we can't verify the prediction
-                        self.room_prediction_correct = False
-                
-                # Reset back to before taking the action
-                obs, infos = self.env.reset()
-                for past_action in self.action_history:
-                    obs, _, _, infos = self.env.step(past_action)
+                    # Reset back to before taking the action
+                    obs, infos = self.env.reset()
+                    for past_action in self.action_history:
+                        obs, _, _, infos = self.env.step(past_action)
+                except Exception as e:
+                    print(f"Error checking room prediction: {e}")
+                    # If there's an error, just continue without checking room prediction
+                    self.room_prediction_correct = False
         
-        # If we still don't have an action, return a penalty
+        # If we still don't have an action, choose a random valid action
         if not self.action or self.action not in valid_actions:
-            self.reward = -1.0  # Penalty for invalid action
-            return self.reward
+            if valid_actions:
+                self.action = random.choice(valid_actions)
+                print(f"Using random action: {self.action}")
+            else:
+                # If there are no valid actions, use a default action
+                self.action = "look"
+                print("No valid actions available, using 'look'")
+            
+            # Apply penalty for invalid action
+            self.reward = -1.0
         
-        # Take the first action
-        obs, reward, done, infos = self.env.step(self.action)
-        self.reward += reward
-        self.steps += 1
-        
-        # If done after first action, return the reward
-        if done:
-            self.done = True
-            self.success = (reward > 0)
-            return self.reward
-        
-        # Continue the rollout
-        while not done and self.steps < max_steps:
-            # Get valid actions
-            valid_actions = [
-                a for a in infos["admissible_commands"]
-                if a.lower() not in ['inventory', 'look']
-            ]
-            
-            # Get action from agent
-            action, _ = self.agent.get_action_fast(
-                self.env, obs, infos, valid_actions, self.steps
-            )
-            
-            # Take action in environment
-            obs, step_reward, done, infos = self.env.step(action)
-            
-            # Update reward (with discount)
-            self.reward += (gamma ** self.steps) * step_reward
-            
-            # Update agent state
-            self.agent.update_state_after_action(obs, step_reward, done, infos)
-            
+        try:
+            # Take the first action
+            obs, reward, done, infos = self.env.step(self.action)
+            self.reward += reward
             self.steps += 1
-        
-        self.done = done
-        self.success = (done and self.reward > 0)
+            
+            # If done after first action, return the reward
+            if done:
+                self.done = True
+                self.success = (reward > 0)
+                return self.reward
+            
+            # Continue the rollout
+            while not done and self.steps < max_steps:
+                # Get valid actions
+                valid_actions = [
+                    a for a in infos["admissible_commands"]
+                    if a.lower() not in ['inventory', 'look']
+                ]
+                
+                # Get action from agent
+                action, _ = self.agent.get_action_fast(
+                    self.env, obs, infos, valid_actions, self.steps
+                )
+                
+                # Take action in environment
+                obs, step_reward, done, infos = self.env.step(action)
+                
+                # Update reward (with discount)
+                self.reward += (gamma ** self.steps) * step_reward
+                
+                # Update agent state
+                self.agent.update_state_after_action(obs, step_reward, done, infos)
+                
+                self.steps += 1
+            
+            self.done = done
+            self.success = (done and self.reward > 0)
+            
+        except Exception as e:
+            print(f"Error during rollout: {e}")
+            # If there's an error during the rollout, return a penalty
+            self.reward = -1.0
+            self.done = True
+            self.success = False
         
         return self.reward
     
