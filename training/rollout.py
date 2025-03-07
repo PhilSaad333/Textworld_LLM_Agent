@@ -65,6 +65,17 @@ class Rollout:
     
     def extract_action_from_completion(self, completion, valid_actions):
         """Extract action and format check from a completion"""
+        # Check if completion is None
+        if completion is None:
+            print("Warning: Received None completion")
+            return {
+                "action": valid_actions[0] if valid_actions else "look",
+                "format_check_passed": False,
+                "command": None,
+                "room_prediction": None,
+                "completion_token_count": 0
+            }
+        
         # Use the agent's method 
         action_info = self.agent.extract_action_from_completion(completion, valid_actions)
         
@@ -82,9 +93,13 @@ class Rollout:
         # Update format check status
         self.format_check_passed = action_info["format_check_passed"]
         
-        # Count tokens in the completion
-        completion_token_count = len(self.tokenizer.encode(completion))
-        action_info["completion_token_count"] = completion_token_count
+        # Count tokens in the completion (safely)
+        try:
+            completion_token_count = len(self.tokenizer.encode(completion))
+            action_info["completion_token_count"] = completion_token_count
+        except Exception as e:
+            print(f"Error counting tokens: {e}")
+            action_info["completion_token_count"] = 0
         
         # Ensure we have a valid action
         if not action_info.get('action') and valid_actions:
@@ -94,83 +109,88 @@ class Rollout:
                     action_info['action'] = action
                     print(f"Found valid action in completion: {action}")
                     break
+            
+            # If still no action found, use the first valid action
+            if not action_info.get('action') and valid_actions:
+                action_info['action'] = valid_actions[0]
+                print(f"No valid action found in completion, using: {valid_actions[0]}")
         
         return action_info
     
     def run(self, max_steps=10, gamma=0.99):
-        """Run the rollout and return the reward
-        
-        Args:
-            max_steps: Maximum number of steps to run the rollout for
-            gamma: Discount factor for future rewards
-            
-        Returns:
-            The total discounted reward from the rollout
-        """
-        # Reset environment
-        obs, infos = self.env.reset()
-        
-        # Replay action history to get to current state
-        for past_action in self.action_history:
-            obs, _, _, infos = self.env.step(past_action)
-        
-        # Get valid actions
-        valid_actions = [
-            a for a in infos["admissible_commands"]
-            if a.lower() not in ['inventory', 'look']
-        ]
-        
-        # If we have a completion but no action, extract the action
-        if self.completion and not self.action:
-            action_info = self.extract_action_from_completion(self.completion, valid_actions)
-            self.action = action_info.get('action', None)
-            
-            # Store the completion token count
-            self.completion_token_count = action_info.get('completion_token_count', 0)
-            
-            # Check if room prediction is correct
-            if action_info.get('room_prediction') and self.action is not None:
-                try:
-                    # Take the action to see what room we end up in
-                    temp_obs, _, temp_done, _ = self.env.step(self.action)
-                    if not temp_done:
-                        next_room = self.agent._get_room_name(temp_obs)
-                        
-                        # Handle the case where next_room is None (room didn't change)
-                        if next_room is None:
-                            # If room name not found in observation, assume we're still in the same room
-                            next_room = self.agent.last_known_room
-                        
-                        # Now check if the prediction is correct (safely)
-                        if next_room is not None and action_info.get('room_prediction') is not None:
-                            self.room_prediction_correct = (next_room.lower() == action_info.get('room_prediction').lower())
-                        else:
-                            # If either is None, we can't verify the prediction
-                            self.room_prediction_correct = False
-                    
-                    # Reset back to before taking the action
-                    obs, infos = self.env.reset()
-                    for past_action in self.action_history:
-                        obs, _, _, infos = self.env.step(past_action)
-                except Exception as e:
-                    print(f"Error checking room prediction: {e}")
-                    # If there's an error, just continue without checking room prediction
-                    self.room_prediction_correct = False
-        
-        # If we still don't have an action, choose a random valid action
-        if not self.action or self.action not in valid_actions:
-            if valid_actions:
-                self.action = random.choice(valid_actions)
-                print(f"Using random action: {self.action}")
-            else:
-                # If there are no valid actions, use a default action
-                self.action = "look"
-                print("No valid actions available, using 'look'")
-            
-            # Apply penalty for invalid action
-            self.reward = -1.0
-        
+        """Run the rollout and return the reward"""
         try:
+            # Reset environment
+            obs, infos = self.env.reset()
+            
+            # Replay action history to get to current state
+            for past_action in self.action_history:
+                obs, _, _, infos = self.env.step(past_action)
+            
+            # Get valid actions
+            valid_actions = [
+                a for a in infos["admissible_commands"]
+                if a.lower() not in ['inventory', 'look']
+            ]
+            
+            # If no valid actions, add a default one
+            if not valid_actions:
+                valid_actions = ["look"]
+            
+            # If we have a completion but no action, extract the action
+            if self.completion and not self.action:
+                try:
+                    action_info = self.extract_action_from_completion(self.completion, valid_actions)
+                    self.action = action_info.get('action', None)
+                    
+                    # Store the completion token count
+                    self.completion_token_count = action_info.get('completion_token_count', 0)
+                    
+                    # Check if room prediction is correct
+                    if action_info.get('room_prediction') and self.action is not None:
+                        try:
+                            # Take the action to see what room we end up in
+                            temp_obs, _, temp_done, _ = self.env.step(self.action)
+                            if not temp_done:
+                                next_room = self.agent._get_room_name(temp_obs)
+                                
+                                # Handle the case where next_room is None (room didn't change)
+                                if next_room is None:
+                                    # If room name not found in observation, assume we're still in the same room
+                                    next_room = self.agent.last_known_room
+                                
+                                # Now check if the prediction is correct (safely)
+                                if next_room is not None and action_info.get('room_prediction') is not None:
+                                    self.room_prediction_correct = (next_room.lower() == action_info.get('room_prediction').lower())
+                                else:
+                                    # If either is None, we can't verify the prediction
+                                    self.room_prediction_correct = False
+                            
+                            # Reset back to before taking the action
+                            obs, infos = self.env.reset()
+                            for past_action in self.action_history:
+                                obs, _, _, infos = self.env.step(past_action)
+                        except Exception as e:
+                            print(f"Error checking room prediction: {e}")
+                            # If there's an error, just continue without checking room prediction
+                            self.room_prediction_correct = False
+                except Exception as e:
+                    print(f"Error extracting action from completion: {e}")
+                    self.action = None
+            
+            # If we still don't have an action, choose a random valid action
+            if not self.action or self.action not in valid_actions:
+                if valid_actions:
+                    self.action = random.choice(valid_actions)
+                    print(f"Using random action: {self.action}")
+                else:
+                    # If there are no valid actions, use a default action
+                    self.action = "look"
+                    print("No valid actions available, using 'look'")
+                
+                # Apply penalty for invalid action
+                self.reward = -1.0
+            
             # Take the first action
             obs, reward, done, infos = self.env.step(self.action)
             self.reward += reward
@@ -190,10 +210,18 @@ class Rollout:
                     if a.lower() not in ['inventory', 'look']
                 ]
                 
+                # If no valid actions, add a default one
+                if not valid_actions:
+                    valid_actions = ["look"]
+                
                 # Get action from agent
-                action, _ = self.agent.get_action_fast(
-                    self.env, obs, infos, valid_actions, self.steps
-                )
+                try:
+                    action, _ = self.agent.get_action_fast(
+                        self.env, obs, infos, valid_actions, self.steps
+                    )
+                except Exception as e:
+                    print(f"Error getting action: {e}")
+                    action = valid_actions[0]
                 
                 # Take action in environment
                 obs, step_reward, done, infos = self.env.step(action)
