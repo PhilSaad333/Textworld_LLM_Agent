@@ -20,10 +20,9 @@ class RLConfig:
     checkpoint_dir: str = "./checkpoints/rl"
     
     # GRPO specific parameters
-    num_generations: int = 4  # Number of completions to generate per prompt
+    num_generations: int = 4  # Number of completions to generate per prompt - MUST match what's used in GRPOConfig
     beta: float = 0.1  # KL penalty coefficient
-    # Removed target_kl and kl_penalty as they're not used by GRPOConfig
-    use_vllm: bool = True  # Use vLLM for faster generation
+    use_vllm: bool = False  # Use vLLM for faster generation
     
     # Reward parameters
     gamma: float = 0.99  # Discount factor

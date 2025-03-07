@@ -137,6 +137,8 @@ class TextWorldRLTrainer:
             beta=rl_config.beta if hasattr(rl_config, 'beta') else 0.1,  # KL penalty coefficient
             use_vllm=rl_config.use_vllm if hasattr(rl_config, 'use_vllm') else False,
             temperature=rl_config.temperature if hasattr(rl_config, 'temperature') else 0.7,
+            num_generations=rl_config.num_generations if hasattr(rl_config, 'num_generations') else 4,
+            report_to=[],
         )
 
     def collect_gameplay_data(self, difficulties=None, episodes_per_difficulty=5):
@@ -147,17 +149,10 @@ class TextWorldRLTrainer:
         episodes_per_difficulty = self.config.episodes_per_difficulty if hasattr(self.config, 'episodes_per_difficulty') else episodes_per_difficulty
 
         # Store episode data as a list of dictionaries
-        # Each dictionary has keys "prompt" "completions" and "rewards", where the values for "completions" and "rewards are a list of strings
         all_episode_data = []
         
         # Number of completions to generate per prompt
-        num_generations = self.config.num_generations if hasattr(self.config, 'num_generations') else 4
-        batch_size = self.grpo_config.per_device_train_batch_size
-
-        # Check compatibility
-        if batch_size % num_generations != 0:
-            print(f"Warning: batch_size ({batch_size}) is not divisible by num_generations ({num_generations})")
-            print("This may cause issues during training. Consider adjusting these values.")
+        num_generations = self.grpo_config.num_generations
         
         # Ensure model is on the correct device before starting
         self.model = self.model.to(self.device)
@@ -685,32 +680,19 @@ class TextWorldRLTrainer:
         # Import our custom trainer
         from training.custom_grpo_trainer import CustomGRPOTrainer
         
-        # Update GRPO config to disable wandb
-        self.grpo_config.report_to = None  # Disable wandb to avoid API key prompt
+        # Ensure batch size is compatible with num_generations
+        # The GRPO trainer expects batch_size to be divisible by num_generations
+        batch_size = self.grpo_config.per_device_train_batch_size
+        num_generations = self.grpo_config.num_generations
         
-        # Adjust batch size to ensure it's compatible with the dataset structure
-        # GRPO expects batch_size to be divisible by the number of completions per prompt
-        # In our dataset, this is typically 4 (from num_generations in collect_gameplay_data)
-        
-        # Determine the number of completions per prompt in the dataset
-        # This is based on how many times each prompt appears in the dataset
-        prompt_counts = Counter(train_dataset["prompt"])
-        most_common_count = prompt_counts.most_common(1)[0][1]
-        
-        # If most_common_count is greater than 1, it means we have multiple completions per prompt
-        if most_common_count > 1:
-            print(f"Detected {most_common_count} completions per prompt in the dataset")
+        if batch_size % num_generations != 0:
+            # Find the largest multiple of num_generations that's <= batch_size
+            new_batch_size = (batch_size // num_generations) * num_generations
+            if new_batch_size == 0:
+                new_batch_size = num_generations
             
-            # Adjust batch size if needed
-            batch_size = self.grpo_config.per_device_train_batch_size
-            if batch_size % most_common_count != 0:
-                # Find the largest multiple of most_common_count that's <= batch_size
-                new_batch_size = (batch_size // most_common_count) * most_common_count
-                if new_batch_size == 0:
-                    new_batch_size = most_common_count
-                
-                print(f"Adjusting batch size from {batch_size} to {new_batch_size} to ensure compatibility")
-                self.grpo_config.per_device_train_batch_size = new_batch_size
+            print(f"Adjusting batch size from {batch_size} to {new_batch_size} to ensure compatibility with num_generations={num_generations}")
+            self.grpo_config.per_device_train_batch_size = new_batch_size
         
         # Initialize our custom GRPO trainer
         trainer = CustomGRPOTrainer(
