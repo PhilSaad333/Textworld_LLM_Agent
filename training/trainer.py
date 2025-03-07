@@ -261,42 +261,7 @@ class TextWorldRLTrainer:
                         # Run the rollout
                         max_rollout_steps = self.config.max_steps - len(action_history) if hasattr(self.config, 'max_steps') else 10
                         
-                        # Special case: if we're near the end of an episode, give more reward for completions
-                        # that might lead to winning the game
-                        if len(action_history) >= self.config.max_steps - 3:
-                            # We're close to the end, so prioritize actions that might win
-                            try:
-                                # Extract action from completion
-                                valid_actions = [
-                                    a for a in infos["admissible_commands"]
-                                    if a.lower() not in ['inventory', 'look']
-                                ]
-                                action_info = rollout.extract_action_from_completion(completion, valid_actions)
-                                action = action_info.get('action', None)
-                                
-                                if action:
-                                    # Create a temporary environment to test if this action wins
-                                    temp_env = copy.deepcopy(env)
-                                    
-                                    # Replay action history
-                                    temp_obs, temp_infos = temp_env.reset()
-                                    for past_action in action_history:
-                                        temp_obs, _, _, temp_infos = temp_env.step(past_action)
-                                    
-                                    # Take the extracted action
-                                    _, temp_reward, temp_done, _ = temp_env.step(action)
-                                    
-                                    # If this action wins the game, give it a high reward
-                                    if temp_done and temp_reward > 0:
-                                        rollout_rewards.append(10.0)  # High reward for winning
-                                        temp_env.close()
-                                        continue
-                                    
-                                    temp_env.close()
-                            except Exception as e:
-                                print(f"Error in terminal state handling: {e}")
-                        
-                        # Normal rollout
+                        # Run the rollout - no special case handling needed
                         rollout.run(max_steps=max_rollout_steps, gamma=self.config.gamma if hasattr(self.config, 'gamma') else 0.99)
                         
                         # Compute total reward including format and room prediction bonuses
@@ -557,6 +522,99 @@ class TextWorldRLTrainer:
         
         return save_path
     
+    def save_enhanced_gameplay_data(self, data_path=None):
+        """Save enhanced gameplay data with additional statistics
+        
+        Args:
+            data_path: Path to the original gameplay data (if None, uses the last saved path)
+            
+        Returns:
+            Path to the enhanced gameplay data
+        """
+        # Use last saved path if no path provided
+        if data_path is None:
+            if hasattr(self, 'last_saved_data_path'):
+                data_path = self.last_saved_data_path
+            else:
+                raise ValueError("No data path provided and no previous save found")
+        
+        # Create a timestamp for the filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create the enhanced data path
+        save_dir = os.path.dirname(data_path)
+        filename = os.path.basename(data_path)
+        enhanced_data_path = f"{save_dir}/enhanced_{filename.replace('.json', '')}_{timestamp}.json"
+        
+        # Load the original data
+        with open(data_path, 'r') as f:
+            data_dict = json.load(f)
+        
+        # Create enhanced metadata
+        enhanced_metadata = {
+            "enhancement_timestamp": timestamp,
+            "original_data_path": data_path,
+            "model_source": self.model.config.name_or_path,
+            "format_failure_penalty": self.config.format_failure_penalty if hasattr(self.config, 'format_failure_penalty') else None,
+            "room_prediction_penalty": self.config.room_prediction_penalty if hasattr(self.config, 'room_prediction_penalty') else None,
+            "description": "Enhanced gameplay data with additional statistics"
+        }
+        
+        # If we have episode data available, add statistics
+        if hasattr(self, 'episode_data'):
+            # Calculate format error rate
+            format_errors = 0
+            total_completions = 0
+            
+            for episode in self.episode_data:
+                for step in episode["steps"]:
+                    for completion in step["completions"]:
+                        total_completions += 1
+                        format_check = self.agent.check_format(completion)
+                        if not (format_check["has_command_tags"] and format_check["has_room_tags"]):
+                            format_errors += 1
+            
+            format_error_rate = format_errors / total_completions if total_completions > 0 else 0
+            enhanced_metadata["format_error_rate"] = format_error_rate
+            enhanced_metadata["total_completions"] = total_completions
+            enhanced_metadata["format_errors"] = format_errors
+            
+            # Add episode success rate
+            successful_episodes = sum(1 for episode in self.episode_data if episode["success"])
+            total_episodes = len(self.episode_data)
+            success_rate = successful_episodes / total_episodes if total_episodes > 0 else 0
+            enhanced_metadata["episode_success_rate"] = success_rate
+            enhanced_metadata["successful_episodes"] = successful_episodes
+            enhanced_metadata["total_episodes"] = total_episodes
+            
+            # Add difficulty breakdown
+            difficulty_stats = {}
+            for difficulty in set(episode["difficulty"] for episode in self.episode_data):
+                episodes_at_difficulty = [ep for ep in self.episode_data if ep["difficulty"] == difficulty]
+                successful_at_difficulty = sum(1 for ep in episodes_at_difficulty if ep["success"])
+                success_rate_at_difficulty = successful_at_difficulty / len(episodes_at_difficulty) if episodes_at_difficulty else 0
+                
+                difficulty_stats[str(difficulty)] = {
+                    "episodes": len(episodes_at_difficulty),
+                    "successful": successful_at_difficulty,
+                    "success_rate": success_rate_at_difficulty
+                }
+            
+            enhanced_metadata["difficulty_stats"] = difficulty_stats
+        
+        # Add enhanced metadata to the data dictionary
+        data_dict["enhanced_metadata"] = enhanced_metadata
+        
+        # Save the enhanced data
+        with open(enhanced_data_path, 'w') as f:
+            json.dump(data_dict, f, indent=2)
+        
+        print(f"Enhanced gameplay data saved to {enhanced_data_path}")
+        print(f"Format error rate: {enhanced_metadata.get('format_error_rate', 'N/A') * 100:.1f}%")
+        print(f"Episode success rate: {enhanced_metadata.get('episode_success_rate', 'N/A') * 100:.1f}%")
+        
+        return enhanced_data_path
+    
     def load_gameplay_data(self, file_path=None):
         """Load gameplay data from a JSON file
         
@@ -576,16 +634,7 @@ class TextWorldRLTrainer:
         # Load data from JSON file
         with open(file_path, 'r') as f:
             data_dict = json.load(f)
-        
-        # Convert to Dataset
-        from datasets import Dataset
-        dataset = Dataset.from_dict(data_dict["data"])
-        
-        print(f"Loaded gameplay data from {file_path}")
-        print(f"Dataset contains {len(dataset)} examples")
-        
-        return dataset
-    
+
     def train(self, use_saved_data=False, data_path=None, save_model_path=None):
         """Train the model using GRPO
         
@@ -600,8 +649,11 @@ class TextWorldRLTrainer:
         else:
             train_dataset = self.collect_gameplay_data()
         
-        # Initialize GRPO trainer
-        trainer = GRPOTrainer(
+        # Import our custom trainer
+        from training.custom_grpo_trainer import CustomGRPOTrainer
+        
+        # Initialize our custom GRPO trainer
+        trainer = CustomGRPOTrainer(
             model=self.model,
             reward_funcs=self.reward_function,
             args=self.grpo_config,
@@ -617,207 +669,3 @@ class TextWorldRLTrainer:
         
         # Save the model
         self.save_model(save_model_path)
-        
-    def evaluate(self, difficulties=None, episodes_per_difficulty=3):
-        """Evaluate the trained model"""
-        if difficulties is None:
-            difficulties = [1, 5, 10, 15]
-            
-        results = {}
-        
-        # Load the latest model
-        self.agent.model = self.model
-        self.agent.tokenizer = self.tokenizer
-        
-        for difficulty in difficulties:
-            success_count = 0
-            total_reward = 0
-            total_steps = 0
-            
-            for _ in range(episodes_per_difficulty):
-                env = self.env_manager.get_or_create_env(difficulty)
-                obs, infos = env.reset()
-                done = False
-                episode_reward = 0
-                steps = 0
-                
-                while not done and steps < self.config.max_steps:
-                    valid_actions = [
-                        a for a in infos["admissible_commands"]
-                        if a.lower() not in ['inventory', 'look']
-                    ]
-                    
-                    action, _ = self.agent.get_action(env, obs, infos, valid_actions, steps)
-                    next_obs, reward, done, next_infos = env.step(action)
-                    
-                    episode_reward += reward
-                    steps += 1
-                    
-                    obs, infos = next_obs, next_infos
-                    self.agent.update_state_after_action(obs, reward, done, next_infos)
-                
-                total_reward += episode_reward
-                total_steps += steps
-                if episode_reward > 0:
-                    success_count += 1
-            
-            results[difficulty] = {
-                "success_rate": success_count / episodes_per_difficulty,
-                "avg_reward": total_reward / episodes_per_difficulty,
-                "avg_steps": total_steps / episodes_per_difficulty
-            }
-            
-        return results
-    
-    def plot_token_trends(self):
-        """Plot token count trends over training steps"""
-        try:
-            import matplotlib.pyplot as plt
-            
-            if not hasattr(self, 'token_tracking_data'):
-                print("No token tracking data available.")
-                return
-            
-            plt.figure(figsize=(10, 6))
-            plt.plot(self.token_tracking_data['steps'], self.token_tracking_data['avg_output_tokens'], 
-                     label='Avg Output Tokens', marker='o')
-            plt.plot(self.token_tracking_data['steps'], self.token_tracking_data['max_output_tokens'], 
-                     label='Max Output Tokens', marker='x')
-            
-            plt.axhline(y=128, color='r', linestyle='--', label='Max New Tokens Limit')
-            
-            plt.xlabel('Training Steps')
-            plt.ylabel('Token Count')
-            plt.title('Output Token Count Trends During Training')
-            plt.legend()
-            plt.grid(True)
-            
-            # Save the plot
-            plt.savefig(f"{self.config.checkpoint_dir}/token_trends.png")
-            print(f"Token trend plot saved to {self.config.checkpoint_dir}/token_trends.png")
-            
-            # Show the plot if in interactive environment
-            plt.show()
-            
-        except ImportError:
-            print("Matplotlib not available. Install with: pip install matplotlib")
-
-    def save_model(self, save_path=None, save_training_state=True):
-        """Save the model and optionally training state
-        
-        Args:
-            save_path: Path to save the model (default: checkpoint_dir/rl_model_timestamp)
-            save_training_state: Whether to save training state data
-            
-        Returns:
-            Path to the saved model
-        """
-        # Create timestamp for filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Determine save path
-        if save_path is None:
-            save_path = f"{self.config.checkpoint_dir}/rl_model_{timestamp}"
-        
-        # Create directory if it doesn't exist
-        os.makedirs(save_path, exist_ok=True)
-        
-        # Save model and tokenizer
-        self.model.save_pretrained(save_path)
-        self.tokenizer.save_pretrained(save_path)
-        
-        print(f"Model and tokenizer saved to {save_path}")
-        
-        # Save training state if requested
-        if save_training_state:
-            training_state = {
-                "timestamp": timestamp,
-                "config": {k: v for k, v in vars(self.config).items() if not callable(v) and not k.startswith('__')},
-                "main_config": {k: v for k, v in vars(self.main_config).items() if not callable(v) and not k.startswith('__')} if self.main_config else None,
-            }
-            
-            # Add token tracking data if available
-            if hasattr(self, 'token_tracking_data'):
-                training_state["token_tracking_data"] = self.token_tracking_data
-            
-            # Add episode data if available
-            if hasattr(self, 'episode_data'):
-                # Only save summary to avoid huge files
-                episode_summary = []
-                for episode in self.episode_data:
-                    summary = {
-                        "difficulty": episode["difficulty"],
-                        "success": episode["success"],
-                        "num_steps": len(episode["steps"]),
-                        "avg_reward": sum(max(step["rewards"]) for step in episode["steps"]) / len(episode["steps"]) if episode["steps"] else 0
-                    }
-                    episode_summary.append(summary)
-                
-                training_state["episode_summary"] = episode_summary
-            
-            # Save training state to JSON file
-            with open(f"{save_path}/training_state.json", 'w') as f:
-                json.dump(training_state, f, indent=2)
-            
-            print(f"Training state saved to {save_path}/training_state.json")
-        
-        # Save a PyTorch checkpoint for compatibility with other code
-        torch.save(
-            self.model.state_dict(),
-            f"{save_path}/pytorch_model.pt"
-        )
-        print(f"PyTorch checkpoint saved to {save_path}/pytorch_model.pt")
-        
-        return save_path
-
-    def load_model(self, model_path):
-        """Load a saved model
-        
-        Args:
-            model_path: Path to the saved model
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            print(f"Loading model from {model_path}...")
-            
-            # Check if this is a directory or a .pt file
-            if os.path.isdir(model_path):
-                # Load from Hugging Face format
-                self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
-                self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-            elif model_path.endswith('.pt'):
-                # Load from PyTorch checkpoint
-                checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-                
-                # Initialize the model with the base architecture
-                self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-                
-                # Resize model embeddings to match tokenizer with special tokens
-                special_tokens = {
-                    'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
-                }
-                self.tokenizer.add_special_tokens(special_tokens)
-                self.model.resize_token_embeddings(len(self.tokenizer))
-                
-                # Load the state dict
-                self.model.load_state_dict(checkpoint)
-            else:
-                raise ValueError(f"Unsupported model path format: {model_path}")
-            
-            # Move model to device
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self.model = self.model.to(self.device)
-            
-            # Update agent's model and tokenizer
-            self.agent.model = self.model
-            self.agent.tokenizer = self.tokenizer
-            self.agent.device = self.device
-            
-            print(f"Model loaded successfully to {self.device}")
-            return True
-            
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            return False
