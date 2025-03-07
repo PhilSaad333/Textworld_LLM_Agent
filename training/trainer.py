@@ -12,6 +12,7 @@ import os
 from datetime import datetime
 from google.colab import drive
 import copy
+from collections import Counter
 
 class TextWorldRLTrainer:
     def __init__(self, rl_config, main_config=None, model_path=None, use_map=True):
@@ -151,6 +152,12 @@ class TextWorldRLTrainer:
         
         # Number of completions to generate per prompt
         num_generations = self.config.num_generations if hasattr(self.config, 'num_generations') else 4
+        batch_size = self.grpo_config.per_device_train_batch_size
+
+        # Check compatibility
+        if batch_size % num_generations != 0:
+            print(f"Warning: batch_size ({batch_size}) is not divisible by num_generations ({num_generations})")
+            print("This may cause issues during training. Consider adjusting these values.")
         
         # Ensure model is on the correct device before starting
         self.model = self.model.to(self.device)
@@ -678,18 +685,32 @@ class TextWorldRLTrainer:
         # Import our custom trainer
         from training.custom_grpo_trainer import CustomGRPOTrainer
         
-        # Update GRPO config to disable wandb and ensure num_generations is set correctly
+        # Update GRPO config to disable wandb
         self.grpo_config.report_to = None  # Disable wandb to avoid API key prompt
         
-        # Ensure num_generations is set to a value that divides the batch size evenly
-        batch_size = self.grpo_config.per_device_train_batch_size
-        if not hasattr(self.config, 'num_generations') or batch_size % self.config.num_generations != 0:
-            # Find the largest divisor of batch_size that's <= 4
-            for n_gen in range(min(4, batch_size), 0, -1):
-                if batch_size % n_gen == 0:
-                    self.config.num_generations = n_gen
-                    print(f"Setting num_generations to {n_gen} to ensure divisibility with batch size {batch_size}")
-                    break
+        # Adjust batch size to ensure it's compatible with the dataset structure
+        # GRPO expects batch_size to be divisible by the number of completions per prompt
+        # In our dataset, this is typically 4 (from num_generations in collect_gameplay_data)
+        
+        # Determine the number of completions per prompt in the dataset
+        # This is based on how many times each prompt appears in the dataset
+        prompt_counts = Counter(train_dataset["prompt"])
+        most_common_count = prompt_counts.most_common(1)[0][1]
+        
+        # If most_common_count is greater than 1, it means we have multiple completions per prompt
+        if most_common_count > 1:
+            print(f"Detected {most_common_count} completions per prompt in the dataset")
+            
+            # Adjust batch size if needed
+            batch_size = self.grpo_config.per_device_train_batch_size
+            if batch_size % most_common_count != 0:
+                # Find the largest multiple of most_common_count that's <= batch_size
+                new_batch_size = (batch_size // most_common_count) * most_common_count
+                if new_batch_size == 0:
+                    new_batch_size = most_common_count
+                
+                print(f"Adjusting batch size from {batch_size} to {new_batch_size} to ensure compatibility")
+                self.grpo_config.per_device_train_batch_size = new_batch_size
         
         # Initialize our custom GRPO trainer
         trainer = CustomGRPOTrainer(
