@@ -171,7 +171,20 @@ class TextWorldLLMAgent:
             return room_name
             
         # If we can't find a new room name, return the last known room
+        # but don't print debug message for common actions that don't change rooms
         if self.last_known_room:
+            # Check if this is likely an action that doesn't change rooms
+            non_movement_indicators = [
+                "take", "drop", "pick up", "put", "open", "close", "examine", 
+                "look at", "inventory", "You take", "You drop", "You put"
+            ]
+            
+            if any(indicator in obs for indicator in non_movement_indicators):
+                # This is likely an action that doesn't change rooms, so return last known room silently
+                return self.last_known_room
+            
+            # For other cases, return last known room but log it
+            print(f"DEBUG - Could not find room name in observation, using last known room: {self.last_known_room}")
             return self.last_known_room
         
         # If we have no room information yet, log it

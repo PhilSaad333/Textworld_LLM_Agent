@@ -117,7 +117,18 @@ class Rollout:
                 temp_obs, _, temp_done, _ = self.env.step(self.action)
                 if not temp_done:
                     next_room = self.agent._get_room_name(temp_obs)
-                    self.room_prediction_correct = (next_room.lower() == action_info.get('room_prediction').lower())
+                    
+                    # Handle the case where next_room is None (room didn't change)
+                    if next_room is None:
+                        # If room name not found in observation, assume we're still in the same room
+                        next_room = self.agent.last_known_room
+                    
+                    # Now check if the prediction is correct (safely)
+                    if next_room is not None and action_info.get('room_prediction') is not None:
+                        self.room_prediction_correct = (next_room.lower() == action_info.get('room_prediction').lower())
+                    else:
+                        # If either is None, we can't verify the prediction
+                        self.room_prediction_correct = False
                 
                 # Reset back to before taking the action
                 obs, infos = self.env.reset()
