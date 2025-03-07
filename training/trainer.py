@@ -109,12 +109,13 @@ class TextWorldRLTrainer:
         self.model = self.model.to(self.device)
         
         # Create agent for evaluation
-        self.agent = TextWorldLLMAgent(self.main_config, use_map=use_map)
-        
+        self.agent = TextWorldLLMAgent(self.main_config, training_mode=True, use_map=use_map)
+
         # Set the model and tokenizer directly instead of having the agent load them
         self.agent.model = self.model
         self.agent.tokenizer = self.tokenizer
         self.agent.device = self.device  # Explicitly set the agent's device
+        self.agent.training_mode = False  # Set back to False for normal operation
         
         # Configure GRPO
         self.grpo_config = GRPOConfig(
