@@ -2,7 +2,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 import os
-from google.colab import drive
 
 class GameRunner:
     def __init__(self, agent, env_manager, config, log_dir="logs/games"):
@@ -291,7 +290,7 @@ def setup_and_run_games(model_path, difficulties=None, games_per_difficulty=1, u
     agent = TextWorldLLMAgent(config, model_path=model_path, use_map=use_map)
     
     # Create game runner
-    log_dir = "/content/drive/MyDrive/textworld_logs/games"
+    log_dir = "logs/games"  # Use local path instead of Drive
     runner = GameRunner(agent, env_manager, config, log_dir=log_dir)
     
     # Run games
@@ -305,8 +304,5 @@ def setup_and_run_games(model_path, difficulties=None, games_per_difficulty=1, u
     
     return results
 
-# Mount Google Drive
-drive.mount('/content/drive')
-
-# Use Drive path
-log_dir = "/content/drive/MyDrive/textworld_logs/games"
+# Use local path
+log_dir = "logs/games"
