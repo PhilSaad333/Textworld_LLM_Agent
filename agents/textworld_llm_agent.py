@@ -88,9 +88,14 @@ class TextWorldLLMAgent:
             if hasattr(self, 'tokenizer'):
                 del self.tokenizer
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.empty_cache()
+                except Exception as e:
+                    # Silently ignore CUDA cleanup errors
+                    pass
         except Exception as e:
-            print(f"Warning: Error during cleanup: {str(e)}")
+            # Silently ignore cleanup errors
+            pass
         
     def reset(self):
         """Reset agent state"""

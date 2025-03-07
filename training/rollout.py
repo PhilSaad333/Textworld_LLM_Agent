@@ -149,9 +149,18 @@ class Rollout:
                     # Check if room prediction is correct
                     if action_info.get('room_prediction') and self.action is not None:
                         try:
+                            # Create a copy of the environment to check room prediction
+                            # without affecting the main rollout
+                            temp_env = copy.deepcopy(self.env)
+                            
                             # Take the action to see what room we end up in
-                            temp_obs, _, temp_done, _ = self.env.step(self.action)
-                            if not temp_done:
+                            temp_obs, _, temp_done, _ = temp_env.step(self.action)
+                            
+                            # If the action ends the game, we can't verify room prediction
+                            if temp_done:
+                                # For terminal states, we can't verify room prediction
+                                self.room_prediction_correct = False
+                            else:
                                 next_room = self.agent._get_room_name(temp_obs)
                                 
                                 # Handle the case where next_room is None (room didn't change)
@@ -166,10 +175,9 @@ class Rollout:
                                     # If either is None, we can't verify the prediction
                                     self.room_prediction_correct = False
                             
-                            # Reset back to before taking the action
-                            obs, infos = self.env.reset()
-                            for past_action in self.action_history:
-                                obs, _, _, infos = self.env.step(past_action)
+                            # Clean up the temporary environment
+                            temp_env.close()
+                            
                         except Exception as e:
                             print(f"Error checking room prediction: {e}")
                             # If there's an error, just continue without checking room prediction

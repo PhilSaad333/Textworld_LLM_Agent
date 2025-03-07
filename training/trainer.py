@@ -11,6 +11,7 @@ import json
 import os
 from datetime import datetime
 from google.colab import drive
+import copy
 
 class TextWorldRLTrainer:
     def __init__(self, rl_config, main_config=None, model_path=None, use_map=True):
@@ -251,6 +252,43 @@ class TextWorldRLTrainer:
                         
                         # Run the rollout
                         max_rollout_steps = self.config.max_steps - len(action_history) if hasattr(self.config, 'max_steps') else 10
+                        
+                        # Special case: if we're near the end of an episode, give more reward for completions
+                        # that might lead to winning the game
+                        if len(action_history) >= self.config.max_steps - 3:
+                            # We're close to the end, so prioritize actions that might win
+                            try:
+                                # Extract action from completion
+                                valid_actions = [
+                                    a for a in infos["admissible_commands"]
+                                    if a.lower() not in ['inventory', 'look']
+                                ]
+                                action_info = rollout.extract_action_from_completion(completion, valid_actions)
+                                action = action_info.get('action', None)
+                                
+                                if action:
+                                    # Create a temporary environment to test if this action wins
+                                    temp_env = copy.deepcopy(env)
+                                    
+                                    # Replay action history
+                                    temp_obs, temp_infos = temp_env.reset()
+                                    for past_action in action_history:
+                                        temp_obs, _, _, temp_infos = temp_env.step(past_action)
+                                    
+                                    # Take the extracted action
+                                    _, temp_reward, temp_done, _ = temp_env.step(action)
+                                    
+                                    # If this action wins the game, give it a high reward
+                                    if temp_done and temp_reward > 0:
+                                        rollout_rewards.append(10.0)  # High reward for winning
+                                        temp_env.close()
+                                        continue
+                                    
+                                    temp_env.close()
+                            except Exception as e:
+                                print(f"Error in terminal state handling: {e}")
+                        
+                        # Normal rollout
                         rollout.run(max_steps=max_rollout_steps, gamma=self.config.gamma if hasattr(self.config, 'gamma') else 0.99)
                         
                         # Compute total reward including format and room prediction bonuses
