@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoModelForSeq2SeqLM, AutoModelForCausalLM, AutoTokenizer
 import re
 
 class TextWorldLLMAgent:
@@ -28,6 +28,16 @@ class TextWorldLLMAgent:
             raise ValueError("game_config must have treasure_level attribute")
         if not hasattr(config, 'max_steps'):
             raise ValueError("Config must have max_steps attribute")
+        if not hasattr(config, 'model_config'):
+            raise ValueError("Config must have model_config attribute")
+        if not hasattr(config.model_config, 'model_name'):
+            raise ValueError("model_config must have model_name attribute")
+        
+        # Get model name from config
+        self.model_name = config.model_config.model_name
+        
+        # Determine if model is autoregressive or seq2seq
+        self.is_autoregressive = "t5" not in self.model_name.lower() and "bart" not in self.model_name.lower()
         
         # Initialize model and tokenizer only if not in training mode
         if not training_mode:
@@ -38,13 +48,22 @@ class TextWorldLLMAgent:
                         torch.cuda.empty_cache()
                     
                     # Load the base model and tokenizer
-                    self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-                    self.tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+                    if self.is_autoregressive:
+                        self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+                    else:
+                        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+                    
+                    self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                     
                     # Add special tokens for command and room tags
                     special_tokens = {
                         'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
                     }
+                    
+                    # Add pad token if it doesn't exist (for some autoregressive models)
+                    if self.is_autoregressive and self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                    
                     self.tokenizer.add_special_tokens(special_tokens)
                     
                     # Resize the model's token embeddings to account for the new tokens
@@ -62,17 +81,37 @@ class TextWorldLLMAgent:
                 except Exception as e:
                     raise RuntimeError(f"Failed to load fine-tuned model: {str(e)}")
             else:
-                print("Loading FLAN-T5-BASE model and tokenizer...")
+                print(f"Loading base model and tokenizer: {self.model_name}...")
                 try:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     
-                    self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-                    self.tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+                    # Load the base model and tokenizer
+                    if self.is_autoregressive:
+                        self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+                    else:
+                        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+                    
+                    self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+                    
+                    # Add special tokens for command and room tags
+                    special_tokens = {
+                        'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+                    }
+                    
+                    # Add pad token if it doesn't exist (for some autoregressive models)
+                    if self.is_autoregressive and self.tokenizer.pad_token is None:
+                        self.tokenizer.pad_token = self.tokenizer.eos_token
+                    
+                    self.tokenizer.add_special_tokens(special_tokens)
+                    
+                    # Resize the model's token embeddings to account for the new tokens
+                    self.model.resize_token_embeddings(len(self.tokenizer))
                     
                     self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                     print(f"Using device: {self.device}")
                     self.model.to(self.device)
+                    self.model.eval()  # Set to evaluation mode
                 except Exception as e:
                     raise RuntimeError(f"Failed to load model: {str(e)}")
         
@@ -257,7 +296,7 @@ class TextWorldLLMAgent:
                 self.map_tool.update(room, clean_obs)
             map_str = f"\nMap:\n{self.map_tool.get_text_representation()}"
         
-        prompt = f"""You are playing a text adventure game. Analyze this game state and give a response formatted as requested:
+        base_prompt = f"""You are playing a text adventure game. Analyze this game state and give a response formatted as requested:
 
 Game State:
 Goal: {self.goal if self.goal else "Unknown"}
@@ -280,6 +319,12 @@ I predict that I will be in room: <room>[room name]</room>
 
 Your response:"""
 
+        # For autoregressive models, add a newline to help the model understand where to start generating
+        if hasattr(self, 'is_autoregressive') and self.is_autoregressive:
+            prompt = base_prompt + "\n"
+        else:
+            prompt = base_prompt
+            
         return prompt
 
     def get_action(self, env, obs, infos, valid_actions, step=0, batch_mode=False):
@@ -313,17 +358,43 @@ Your response:"""
                 prompt = self.format_prompt(obs, valid_actions, current_room)
                 
                 inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=256,
-                    min_length=20,
-                    num_beams=5,
-                    temperature=0.7,
-                    do_sample=True,
-                    no_repeat_ngram_size=3,
-                    early_stopping=True
-                )
-                full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+                
+                # Different generation approach for autoregressive vs seq2seq models
+                if self.is_autoregressive:
+                    # For autoregressive models like GPT-2
+                    attention_mask = inputs.get('attention_mask', None)
+                    outputs = self.model.generate(
+                        inputs.input_ids,
+                        attention_mask=attention_mask,
+                        max_new_tokens=256,
+                        min_length=len(inputs.input_ids[0]) + 20,  # Original + at least 20 new tokens
+                        num_beams=5,
+                        temperature=0.7,
+                        do_sample=True,
+                        no_repeat_ngram_size=3,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        early_stopping=True
+                    )
+                    # For autoregressive models, we need to remove the input prompt from the output
+                    full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+                    # Extract only the generated part (remove the input prompt)
+                    input_length = len(self.tokenizer.decode(inputs.input_ids[0], skip_special_tokens=False))
+                    full_response = full_response[input_length:].strip()
+                else:
+                    # For seq2seq models like T5
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=256,
+                        min_length=20,
+                        num_beams=5,
+                        temperature=0.7,
+                        do_sample=True,
+                        no_repeat_ngram_size=3,
+                        early_stopping=True
+                    )
+                    full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+                
                 # Remove <pad> token if present
                 full_response = full_response.replace("<pad>", "").strip()
                 
@@ -520,6 +591,7 @@ Your response:"""
     def prepare_for_training(self):
         """Prepare agent for training mode"""
         self.training_mode = True
+        
         # Clear model and tokenizer to free memory
         if hasattr(self, 'model'):
             del self.model
@@ -527,6 +599,38 @@ Your response:"""
             del self.tokenizer
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            
+        # Initialize model and tokenizer for training
+        print(f"Loading model and tokenizer for training: {self.model_name}")
+        try:
+            # Load the base model and tokenizer based on model type
+            if self.is_autoregressive:
+                self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+            else:
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+            
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            
+            # Add special tokens for command and room tags
+            special_tokens = {
+                'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+            }
+            
+            # Add pad token if it doesn't exist (for some autoregressive models)
+            if self.is_autoregressive and self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            
+            self.tokenizer.add_special_tokens(special_tokens)
+            
+            # Resize the model's token embeddings to account for the new tokens
+            self.model.resize_token_embeddings(len(self.tokenizer))
+            
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Using device for training: {self.device}")
+            self.model.to(self.device)
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to load model for training: {str(e)}")
 
     def update_state(self, step_count):
         """Update agent's state tracking"""
@@ -593,27 +697,51 @@ Your response:"""
         prompt = self.format_prompt(obs, valid_actions, current_room)
         
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        outputs = self.model.generate(
-            **inputs,
-            max_new_tokens=128,
-            num_beams=1,  # Use greedy decoding
-            temperature=0.7,
-            do_sample=False,  # No sampling for deterministic results
-            early_stopping=True
-        )
         
-        full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+        # Different generation approach for autoregressive vs seq2seq models
+        if self.is_autoregressive:
+            # For autoregressive models like GPT-2
+            attention_mask = inputs.get('attention_mask', None)
+            outputs = self.model.generate(
+                inputs.input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=128,
+                num_beams=1,  # Use greedy decoding
+                temperature=0.7,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id
+            )
+            # For autoregressive models, we need to remove the input prompt from the output
+            full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+            # Extract only the generated part (remove the input prompt)
+            input_length = len(self.tokenizer.decode(inputs.input_ids[0], skip_special_tokens=False))
+            full_response = full_response[input_length:].strip()
+        else:
+            # For seq2seq models like T5
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=128,
+                num_beams=1,  # Use greedy decoding
+                temperature=0.7,
+                do_sample=False
+            )
+            full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+        
+        # Remove <pad> token if present
         full_response = full_response.replace("<pad>", "").strip()
         
-        # Extract action using existing method
-        action_info = self.extract_action_from_completion(full_response, valid_actions)
-        action = action_info.get('action')
+        # Extract action from completion
+        result = self.extract_action_from_completion(full_response, valid_actions)
         
-        # Fallback to first valid action if needed
-        if not action or action not in valid_actions:
-            action = valid_actions[0]
+        if result["action"] is None:
+            # If no valid action found, use a fallback
+            if valid_actions:
+                return valid_actions[0]  # Just take the first valid action
+            else:
+                return "look"  # Fallback to look if no valid actions
         
-        return action, {"format_check_passed": action_info.get('format_check_passed', False)}
+        return result["action"]
 
     def check_format(self, text):
         """

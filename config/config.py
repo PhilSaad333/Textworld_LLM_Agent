@@ -26,7 +26,7 @@ class GameType(Enum):
 @dataclass
 class ModelConfig:
     # Pretrained model settings
-    model_name: str = "google/flan-t5-base"
+    model_name: str = "gpt2-medium"
     freeze_obs_base: bool = True
     unfreeze_last_n_obs_layers: int = 2
 
@@ -89,7 +89,7 @@ class GameConfig:
 @dataclass
 class SFTConfig:
     # Model settings
-    model_name: str = "google/flan-t5-base"
+    model_name: str = "gpt2-medium"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Training hyperparameters
