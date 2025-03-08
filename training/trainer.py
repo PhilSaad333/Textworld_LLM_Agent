@@ -677,6 +677,9 @@ class TextWorldRLTrainer:
         else:
             train_dataset = self.collect_gameplay_data()
         
+        # Set model to training mode
+        self.model.train()
+        
         # Import our custom trainer
         from training.custom_grpo_trainer import CustomGRPOTrainer
         

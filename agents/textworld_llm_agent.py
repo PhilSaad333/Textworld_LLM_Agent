@@ -668,6 +668,24 @@ Your response:"""
             "room": room
         }
 
+    def train(self, use_saved_data=False, data_path=None, save_model_path=None):
+        """Train the model using GRPO"""
+        # Get training data
+        if use_saved_data:
+            train_dataset = self.load_gameplay_data(data_path)
+        else:
+            train_dataset = self.collect_gameplay_data()
+        
+        # Set model to training mode and ensure parameters are trainable
+        self.model.train()
+        for param in self.model.parameters():
+            param.requires_grad = True
+        
+        # Import our custom trainer
+        from training.custom_grpo_trainer import CustomGRPOTrainer
+        
+        # Rest of the method...
+
 class MapTool:
     def __init__(self):
         self.rooms = {}  # room_name -> {description, connections}
