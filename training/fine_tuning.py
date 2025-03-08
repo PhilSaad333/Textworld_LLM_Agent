@@ -55,8 +55,14 @@ class SFTTrainer:
         
         # Initialize model and tokenizer based on model type
         if self.is_autoregressive:
-            self.model = AutoModelForCausalLM.from_pretrained(config.model_name)
+            # For autoregressive models like GPT-2
+            self.model = AutoModelForCausalLM.from_pretrained(
+                config.model_name,
+                # Set proper loss type for GPT-2
+                torch_dtype=torch.float16 if config.mixed_precision and torch.cuda.is_available() else torch.float32
+            )
         else:
+            # For sequence-to-sequence models like T5
             self.model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name)
             
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
@@ -75,38 +81,58 @@ class SFTTrainer:
         # Resize the model's token embeddings to account for the new tokens
         self.model.resize_token_embeddings(len(self.tokenizer))
         
+        # Move model to device
         self.model.to(self.device)
         
-        # Freeze all layers except the last n_unfrozen_layers
-        n_unfrozen_layers = 3  # Adjust this based on performance
+        # Freeze most of the model parameters to reduce memory usage
+        # Keep only the last few layers trainable
+        num_layers_to_keep_trainable = 2  # Only train the last 2 layers
         
-        # Get all layer names
-        layer_names = [name for name, _ in self.model.named_parameters()]
-        encoder_layers = [name for name in layer_names if 'encoder.block' in name]
-        decoder_layers = [name for name in layer_names if 'decoder.block' in name]
-        
-        # Calculate which layers to freeze
-        n_encoder_layers = len(set([name.split('.')[2] for name in encoder_layers]))
-        n_decoder_layers = len(set([name.split('.')[2] for name in decoder_layers]))
-        
-        # Freeze parameters
-        for name, param in self.model.named_parameters():
-            # Always train layer norm and bias terms
-            if 'layer_norm' in name or 'bias' in name:
-                param.requires_grad = True
-            # Train only the last n_unfrozen_layers of encoder and decoder
-            elif 'encoder.block' in name:
-                layer_num = int(name.split('.')[2])
-                param.requires_grad = layer_num >= (n_encoder_layers - n_unfrozen_layers)
-            elif 'decoder.block' in name:
-                layer_num = int(name.split('.')[2])
-                param.requires_grad = layer_num >= (n_decoder_layers - n_unfrozen_layers)
-            else:
-                param.requires_grad = True  # Train all other parameters
-            
-        # Log number of trainable parameters
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        # Count total parameters before freezing
         total_params = sum(p.numel() for p in self.model.parameters())
+        
+        # Freeze parameters based on model type
+        if self.is_autoregressive:
+            # For GPT-2 and similar models
+            if hasattr(self.model, 'transformer'):
+                # Freeze embeddings
+                for param in self.model.transformer.wte.parameters():
+                    param.requires_grad = False
+                for param in self.model.transformer.wpe.parameters():
+                    param.requires_grad = False
+                
+                # Freeze most of the layers
+                if hasattr(self.model.transformer, 'h'):
+                    num_layers = len(self.model.transformer.h)
+                    for i, layer in enumerate(self.model.transformer.h):
+                        # Only keep the last few layers trainable
+                        if i < num_layers - num_layers_to_keep_trainable:
+                            for param in layer.parameters():
+                                param.requires_grad = False
+                
+                # Keep LM head trainable
+                if hasattr(self.model, 'lm_head'):
+                    for param in self.model.lm_head.parameters():
+                        param.requires_grad = True
+        else:
+            # For T5 and similar models
+            if hasattr(self.model, 'encoder'):
+                # Freeze encoder
+                for param in self.model.encoder.parameters():
+                    param.requires_grad = False
+                
+                # Freeze most of decoder layers
+                if hasattr(self.model.decoder, 'block'):
+                    num_layers = len(self.model.decoder.block)
+                    for i, layer in enumerate(self.model.decoder.block):
+                        # Only keep the last few layers trainable
+                        if i < num_layers - num_layers_to_keep_trainable:
+                            for param in layer.parameters():
+                                param.requires_grad = False
+        
+        # Count trainable parameters after freezing
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
         print(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params:.1%} of total)")
         
         # Initialize optimizer and scheduler
@@ -428,10 +454,18 @@ class SFTTrainer:
             
             # Forward pass with mixed precision if enabled
             if self.config.mixed_precision and self.scaler is not None:
-                with torch.cuda.amp.autocast():
-                    outputs = self.model(**inputs)
-                    loss = outputs.loss
-                    loss = loss / self.config.gradient_accumulation_steps
+                try:
+                    # Use the new recommended way for autocast
+                    with torch.amp.autocast('cuda'):
+                        outputs = self.model(**inputs)
+                        loss = outputs.loss
+                        loss = loss / self.config.gradient_accumulation_steps
+                except TypeError:
+                    # Fall back to the old way if using an older PyTorch version
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model(**inputs)
+                        loss = outputs.loss
+                        loss = loss / self.config.gradient_accumulation_steps
                 
                 # Backward pass with gradient scaling
                 self.scaler.scale(loss).backward()
