@@ -9,11 +9,11 @@ from datetime import datetime
 from tqdm import tqdm
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
+from torch.optim import AdamW  # Use PyTorch's AdamW
 from transformers import (
     AutoModelForSeq2SeqLM, 
     AutoModelForCausalLM,
     AutoTokenizer, 
-    AdamW, 
     get_linear_schedule_with_warmup
 )
 import torch.nn.functional as F
@@ -57,9 +57,7 @@ class SFTTrainer:
         if self.is_autoregressive:
             # For autoregressive models like GPT-2
             self.model = AutoModelForCausalLM.from_pretrained(
-                config.model_name,
-                # Set proper loss type for GPT-2
-                torch_dtype=torch.float16 if config.mixed_precision and torch.cuda.is_available() else torch.float32
+                config.model_name
             )
         else:
             # For sequence-to-sequence models like T5
@@ -222,6 +220,7 @@ class SFTTrainer:
             },
         ]
         
+        # Use PyTorch's AdamW instead of transformers' AdamW
         self.optimizer = AdamW(
             optimizer_grouped_parameters,
             lr=self.config.learning_rate,
@@ -472,9 +471,22 @@ class SFTTrainer:
                 
                 # Update weights if we've accumulated enough gradients
                 if (step + 1) % self.config.gradient_accumulation_steps == 0:
-                    # Clip gradients
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.max_grad_norm)
+                    # Check for FP16 gradients before unscaling
+                    has_fp16_grads = False
+                    for param in self.model.parameters():
+                        if param.grad is not None and param.grad.dtype == torch.float16:
+                            has_fp16_grads = True
+                            break
+                    
+                    if not has_fp16_grads:
+                        # Only unscale if we don't have FP16 gradients
+                        self.scaler.unscale_(self.optimizer)
+                        
+                    # Clip gradients (only applied to non-FP16 gradients)
+                    torch.nn.utils.clip_grad_norm_(
+                        [p for p in self.model.parameters() if p.grad is not None and p.grad.dtype != torch.float16],
+                        self.config.max_grad_norm
+                    )
                     
                     # Optimizer step
                     self.scaler.step(self.optimizer)
@@ -483,7 +495,7 @@ class SFTTrainer:
                     self.optimizer.zero_grad()
                     self.global_step += 1
             else:
-                # Standard forward and backward pass
+                # Standard forward and backward pass without mixed precision
                 outputs = self.model(**inputs)
                 loss = outputs.loss
                 loss = loss / self.config.gradient_accumulation_steps
