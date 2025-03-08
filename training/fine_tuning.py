@@ -1,18 +1,29 @@
-import torch
-from torch.utils.data import DataLoader, random_split
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, get_linear_schedule_with_warmup, AutoModelForCausalLM
-from typing import List, Dict, Any
-import wandb
-import numpy as np
-from tqdm import tqdm
 import os
-import re
-import random
 import json
-from torch.utils.data import Dataset
-import torch.nn.functional as F
+import torch
+import numpy as np
+import random
+import re
 import logging
 from datetime import datetime
+from tqdm import tqdm
+from pathlib import Path
+from torch.utils.data import Dataset, DataLoader
+from transformers import (
+    AutoModelForSeq2SeqLM, 
+    AutoModelForCausalLM,
+    AutoTokenizer, 
+    AdamW, 
+    get_linear_schedule_with_warmup
+)
+import torch.nn.functional as F
+
+# Import wandb conditionally to avoid errors if it's not installed
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 
 class SFTTrainer:
     def __init__(self, config):
@@ -103,23 +114,30 @@ class SFTTrainer:
         self.scheduler = None
         
         # Initialize mixed precision training if available
-        self.scaler = torch.cuda.amp.GradScaler() if config.mixed_precision and torch.cuda.is_available() else None
+        if config.mixed_precision and torch.cuda.is_available():
+            try:
+                # Use the new recommended way to create GradScaler
+                self.scaler = torch.amp.GradScaler('cuda')
+            except TypeError:
+                # Fall back to the old way if using an older PyTorch version
+                self.scaler = torch.cuda.amp.GradScaler()
+        else:
+            self.scaler = None
         
         # Initialize tracking variables
         self.global_step = 0
         self.best_val_loss = float('inf')
         
         # Initialize wandb if enabled
+        self.use_wandb = False
         if hasattr(config, 'use_wandb') and config.use_wandb:
-            try:
-                import wandb
+            if WANDB_AVAILABLE:
                 self.use_wandb = True
                 print("Weights & Biases logging enabled")
-            except ImportError:
+            else:
                 print("Warning: wandb not installed. Running without wandb logging.")
-                self.use_wandb = False
         else:
-            self.use_wandb = False
+            print("Weights & Biases logging disabled")
             
         print("SFT Trainer initialized successfully")
         
@@ -309,13 +327,17 @@ class SFTTrainer:
             print(f"Validation set has {len(val_dataset)} examples")
         
         # Initialize Weights & Biases if enabled
-        if self.use_wandb:
-            wandb.init(
-                project=self.config.wandb_project,
-                entity=self.config.wandb_entity,
-                config=self.config.__dict__,
-                name=f"{self.config.model_name.split('/')[-1]}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            )
+        if self.use_wandb and WANDB_AVAILABLE:
+            try:
+                wandb.init(
+                    project=self.config.wandb_project if hasattr(self.config, 'wandb_project') else "textworld-sft",
+                    entity=self.config.wandb_entity if hasattr(self.config, 'wandb_entity') else None,
+                    config=self.config.__dict__,
+                    name=f"{self.config.model_name.split('/')[-1]}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                )
+            except Exception as e:
+                print(f"Warning: Failed to initialize wandb: {e}")
+                self.use_wandb = False
         
         # Training loop
         for epoch in range(self.config.num_epochs):
@@ -331,7 +353,7 @@ class SFTTrainer:
                     print(f"  {k}: {v:.4f}")
                 else:
                     print(f"  {k}: {v}")
-                if self.use_wandb:
+                if self.use_wandb and WANDB_AVAILABLE:
                     wandb.log({f"train/{k}": v}, step=epoch)
             
             # Evaluate on validation set if provided
@@ -346,7 +368,7 @@ class SFTTrainer:
                         print(f"  {k}: {v:.4f}")
                     else:
                         print(f"  {k}: {v}")
-                    if self.use_wandb:
+                    if self.use_wandb and WANDB_AVAILABLE:
                         wandb.log({f"val/{k}": v}, step=epoch)
                 
                 # Save best model
@@ -373,8 +395,11 @@ class SFTTrainer:
         )
         
         # Finish W&B run if enabled
-        if self.use_wandb:
-            wandb.finish()
+        if self.use_wandb and WANDB_AVAILABLE:
+            try:
+                wandb.finish()
+            except Exception as e:
+                print(f"Warning: Failed to finish wandb run: {e}")
         
         return train_metrics
     
@@ -452,12 +477,15 @@ class SFTTrainer:
             progress_bar.set_description(f"Epoch {epoch+1} | Loss: {loss.item():.4f}")
             
             # Log to wandb if enabled
-            if self.use_wandb and step % self.config.log_steps == 0:
-                wandb.log({
-                    'train/loss': loss.item(),
-                    'train/lr': self.scheduler.get_last_lr()[0],
-                    'train/step': self.global_step
-                })
+            if self.use_wandb and WANDB_AVAILABLE and step % self.config.log_steps == 0:
+                try:
+                    wandb.log({
+                        'train/loss': loss.item(),
+                        'train/lr': self.scheduler.get_last_lr()[0],
+                        'train/step': self.global_step
+                    })
+                except Exception as e:
+                    print(f"Warning: Failed to log to wandb: {e}")
         
         # Calculate average loss
         avg_loss = total_loss / total_samples
@@ -473,13 +501,16 @@ class SFTTrainer:
         }
         
         # Log samples if using wandb
-        if self.use_wandb:
-            wandb.log({
-                "examples": wandb.Table(
-                    columns=["input", "prediction", "target"],
-                    data=self._get_prediction_samples(train_dataloader)
-                )
-            })
+        if self.use_wandb and WANDB_AVAILABLE:
+            try:
+                wandb.log({
+                    "examples": wandb.Table(
+                        columns=["input", "prediction", "target"],
+                        data=self._get_prediction_samples(train_dataloader)
+                    )
+                })
+            except Exception as e:
+                print(f"Warning: Failed to log examples to wandb: {e}")
         
         return metrics
     
