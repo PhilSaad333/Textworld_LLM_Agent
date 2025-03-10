@@ -4,12 +4,12 @@ import torch
 @dataclass
 class RLConfig:
     # Environment parameters
-    max_steps: int = 50
-    scale: int = 10  # Changed to int to match TaskConfig expectation
+    max_steps: int = 20
+    scale: int = 10
     
     # Model parameters
     learning_rate: float = 5e-5
-    batch_size: int = 8
+    batch_size: int = 6
     gradient_accumulation_steps: int = 2
     max_output_length: int = 128
     max_input_length: int = 512
@@ -25,17 +25,17 @@ class RLConfig:
     optimizer_type: str = "custom"  # 'custom' or 'huggingface'
     
     # GRPO specific parameters
-    num_samples: int = 8  # G in the writeup (number of completions per prompt)
-    num_generations: int = 4  # Legacy parameter for compatibility
+    num_samples: int = 6  # G in the writeup (number of completions per prompt)
+    num_generations: int = 6  # Legacy parameter for compatibility
     epsilon: float = 0.2  # PPO clipping parameter
     beta: float = 0.01  # KL penalty coefficient
     
     # Reward parameters
     gamma: float = 0.99  # Discount factor
-    format_reward: float = 0.5  # Reward for correct format
+    format_reward: float = 0.0  # Reward for correct format
     format_penalty: float = -1.0  # Penalty for incorrect format
-    room_reward: float = 0.5  # Reward for correct room prediction
-    room_penalty: float = -0.5  # Penalty for incorrect room prediction
+    room_reward: float = 0.05  # Reward for correct room prediction
+    room_penalty: float = -0.0  # Penalty for incorrect room prediction
     
     # Training parameters
     num_iterations: int = 3  # Number of training iterations

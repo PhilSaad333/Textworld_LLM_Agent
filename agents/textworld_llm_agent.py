@@ -1,6 +1,7 @@
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoModelForCausalLM, AutoTokenizer
 import re
+import numpy as np
 
 class TextWorldLLMAgent:
     def __init__(self, config, training_mode=False, model_path=None, use_map=False):
@@ -642,7 +643,7 @@ Your response:"""
         """Extract action and format check from a completion"""
         if completion is None:
             return {
-                "action": valid_actions[0] if valid_actions else "look",
+                "action": np.random.choice(valid_actions) if valid_actions else "look",
                 "format_check_passed": False,
                 "command": None
             }
@@ -675,6 +676,17 @@ Your response:"""
                 
                 if highest_similarity > 0.7:  # Threshold for accepting a match
                     action = closest_match
+        
+        # If no valid action found through command tags, try to find any valid action in the completion
+        if action is None and valid_actions:
+            for valid_action in valid_actions:
+                if valid_action.lower() in completion.lower():
+                    action = valid_action
+                    break
+        
+        # If still no action found, use a random valid action
+        if action is None and valid_actions:
+            action = np.random.choice(valid_actions)
         
         return {
             "action": action,

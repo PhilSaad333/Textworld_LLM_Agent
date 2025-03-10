@@ -314,9 +314,35 @@ class TextWorldRLTrainer:
                     episode_data.append(step_data)
                     
                     # Choose action to take in the environment
-                    # Option 1: Choose the completion with the highest reward
-                    best_completion_idx = rollout_rewards.index(max(rollout_rewards))
-                    chosen_completion = completions[best_completion_idx]
+                    # First, check which completions have valid command tags
+                    valid_command_indices = []
+                    for i, completion in enumerate(completions):
+                        # Create a temporary rollout to check format
+                        temp_rollout = Rollout(
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            device=self.device,
+                            env=env,
+                            agent=self.agent,
+                            action_history=action_history,
+                            completion=completion
+                        )
+                        format_check = temp_rollout.agent.check_format(completion)
+                        if format_check["has_command_tags"]:
+                            valid_command_indices.append(i)
+                    
+                    # Strategy 1: If some completions have valid command tags, only sample from those
+                    if valid_command_indices:
+                        # Choose the completion with the highest reward among those with valid command tags
+                        valid_rewards = [rollout_rewards[i] for i in valid_command_indices]
+                        best_valid_idx = valid_command_indices[valid_rewards.index(max(valid_rewards))]
+                        chosen_completion = completions[best_valid_idx]
+                        print(f"Choosing from {len(valid_command_indices)} completions with valid command tags")
+                    else:
+                        # Strategy 2: If no completions have valid command tags, choose the one with highest reward
+                        best_completion_idx = rollout_rewards.index(max(rollout_rewards))
+                        chosen_completion = completions[best_completion_idx]
+                        print("No completions with valid command tags, choosing based on reward")
                     
                     # Create a rollout for the chosen completion to get the action
                     chosen_rollout = Rollout(
@@ -340,6 +366,7 @@ class TextWorldRLTrainer:
                     # If action is invalid, choose a random valid action
                     if action is None or action not in valid_actions:
                         action = np.random.choice(valid_actions)
+                        print(f"Invalid action, using random action: {action}")
                     
                     # Reset environment to current state
                     obs, infos = env.reset()

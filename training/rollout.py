@@ -2,6 +2,7 @@ import re
 import copy
 import torch
 import random
+import numpy as np
 
 class Rollout:
     """Performs a rollout from a given state using a specific action"""
@@ -126,10 +127,10 @@ class Rollout:
                     print(f"Found valid action in completion: {action}")
                     break
             
-            # If still no action found, use the first valid action
+            # If still no action found, use a random valid action
             if not action_info.get('action') and valid_actions:
-                action_info['action'] = valid_actions[0]
-                print(f"No valid action found in completion, using: {valid_actions[0]}")
+                action_info['action'] = np.random.choice(valid_actions)
+                print(f"No valid action found in completion, using random action: {action_info['action']}")
         
         return action_info
     
@@ -190,13 +191,21 @@ class Rollout:
             self.reward += reward
             self.steps += 1
             
-            # Verify room prediction only if the episode doesn't end and we have a prediction
-            if not done and hasattr(self, 'predicted_room') and self.predicted_room:
+            # Extract room prediction from completion
+            self.predicted_room = None
+            if hasattr(self, 'action_info') and self.action_info:
+                self.predicted_room = self.action_info.get('room_prediction')
+            
+            # If room prediction is missing or not correctly formatted, set to None
+            if not self.predicted_room or not hasattr(self, 'format_check_result') or not self.format_check_result.get("has_room_tags", False):
+                self.predicted_room = None
+                
+            # Verify room prediction if possible
+            if self.predicted_room is not None:
                 try:
-                    # Get the actual next room
+                    # Get the room name from the next observation
                     next_room = self.agent._get_room_name(next_obs)
                     
-                    # Handle the case where next_room is None (room didn't change)
                     if next_room is None:
                         # If room name not found in observation, assume we're still in the same room
                         next_room = self.agent.last_known_room
@@ -298,9 +307,11 @@ class Rollout:
                 # If we don't have detailed info, apply full penalty
                 total_reward += config.format_failure_penalty
         
-        # Room prediction penalty - only apply if we were able to verify and it's incorrect
+        # Room prediction penalty - apply if prediction is incorrect or missing
         if hasattr(config, 'room_prediction_penalty') and config.room_prediction_penalty < 0:
-            if hasattr(self, 'room_prediction_correct') and self.room_prediction_correct is not None and not self.room_prediction_correct:
+            # If room prediction is None (missing tags) or explicitly incorrect, apply penalty
+            if (hasattr(self, 'predicted_room') and self.predicted_room is None) or \
+               (hasattr(self, 'room_prediction_correct') and (self.room_prediction_correct is False)):
                 total_reward += config.room_prediction_penalty
         
         return total_reward
