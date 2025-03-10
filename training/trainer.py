@@ -774,12 +774,20 @@ class TextWorldRLTrainer:
         else:
             # Create a simple environment if env_manager is not available
             import textworld
-            env = textworld.start(self.config.game_file)
+            env = textworld.start(self.config.game_file if hasattr(self.config, 'game_file') else None)
         
-        # Get training parameters
-        num_iterations = self.config.num_iterations if hasattr(self.config, 'num_iterations') else 5
+        # Get training parameters from config
+        num_iterations = self.config.num_iterations if hasattr(self.config, 'num_iterations') else 3
         num_episodes_per_iteration = self.config.num_episodes_per_iteration if hasattr(self.config, 'num_episodes_per_iteration') else 5
         max_steps = self.config.max_steps if hasattr(self.config, 'max_steps') else 10
+        
+        # Print training parameters
+        print(f"Training with parameters:")
+        print(f"  num_iterations: {num_iterations}")
+        print(f"  num_episodes_per_iteration: {num_episodes_per_iteration}")
+        print(f"  max_steps: {max_steps}")
+        print(f"  save_path: {save_model_path}")
+        print(f"  trajectories: {len(trajectories)} episodes with {sum(len(t['steps']) for t in trajectories)} total steps")
         
         # Train using our custom GRPO optimizer with pre-collected trajectories
         metrics = self.grpo_optimizer.train(
@@ -824,34 +832,164 @@ class TextWorldRLTrainer:
         Returns:
             List of trajectories in the format expected by our GRPO optimizer
         """
+        print("Converting gameplay data to GRPO format...")
         trajectories = []
         
+        # Check if gameplay_data is a Dataset object
+        if hasattr(self.gameplay_data, 'to_dict') and callable(getattr(self.gameplay_data, 'to_dict')):
+            print("Converting Dataset to dictionary...")
+            data_dict = self.gameplay_data.to_dict()
+            
+            # Check if data_dict contains parallel lists (prompt, completion, reward)
+            if (isinstance(data_dict, dict) and 
+                "prompt" in data_dict and 
+                "completion" in data_dict and 
+                "reward" in data_dict):
+                
+                print("Found parallel lists format, converting to episodes...")
+                
+                # Extract lists
+                prompts = data_dict.get("prompt", [])
+                completions = data_dict.get("completion", [])
+                rewards = data_dict.get("reward", [])
+                
+                # Ensure all lists have the same length
+                min_length = min(len(prompts), len(completions), len(rewards))
+                if min_length < len(prompts) or min_length < len(completions) or min_length < len(rewards):
+                    print(f"Warning: Lists have different lengths. Truncating to {min_length} items.")
+                
+                # Create episodes (each step is its own episode for simplicity)
+                episodes = []
+                for i in range(min_length):
+                    step = {
+                        "prompt": prompts[i],
+                        "completion": completions[i],
+                        "reward": rewards[i]
+                    }
+                    
+                    # Each step becomes its own episode
+                    episodes.append({"steps": [step]})
+                
+                self.gameplay_data = episodes
+                print(f"Converted to {len(episodes)} episodes (one step per episode)")
+            else:
+                print("Could not convert Dataset to the expected format")
+                return []
+        
+        # Check if gameplay_data is a dictionary (possibly from collect_and_save_gameplay_data)
+        elif isinstance(self.gameplay_data, dict):
+            print(f"gameplay_data is a dictionary with keys: {list(self.gameplay_data.keys())}")
+            
+            # Check if it's the format from collect_and_save_gameplay_data
+            if "data" in self.gameplay_data and "metadata" in self.gameplay_data:
+                print("Found 'data' and 'metadata' keys - this appears to be from collect_and_save_gameplay_data")
+                data_dict = self.gameplay_data["data"]
+                
+                # Check if data_dict contains parallel lists (prompt, completion, reward)
+                if (isinstance(data_dict, dict) and 
+                    "prompt" in data_dict and 
+                    "completion" in data_dict and 
+                    "reward" in data_dict):
+                    
+                    print("Converting parallel lists to episodes format...")
+                    
+                    # Extract lists
+                    prompts = data_dict.get("prompt", [])
+                    completions = data_dict.get("completion", [])
+                    rewards = data_dict.get("reward", [])
+                    
+                    # Ensure all lists have the same length
+                    min_length = min(len(prompts), len(completions), len(rewards))
+                    if min_length < len(prompts) or min_length < len(completions) or min_length < len(rewards):
+                        print(f"Warning: Lists have different lengths. Truncating to {min_length} items.")
+                    
+                    # Create episodes (each step is its own episode for simplicity)
+                    episodes = []
+                    for i in range(min_length):
+                        step = {
+                            "prompt": prompts[i],
+                            "completion": completions[i],
+                            "reward": rewards[i]
+                        }
+                        
+                        # Each step becomes its own episode
+                        episodes.append({"steps": [step]})
+                    
+                    self.gameplay_data = episodes
+                    print(f"Converted to {len(episodes)} episodes (one step per episode)")
+                else:
+                    print("Data format not recognized within 'data' key")
+                    return []
+            else:
+                print("Dictionary format not recognized")
+                return []
+        
+        # Check if gameplay_data is a list (expected format)
+        if not isinstance(self.gameplay_data, list):
+            print(f"Warning: After conversion, gameplay_data is still not a list, it's a {type(self.gameplay_data)}.")
+            return []
+        
+        # Process each episode
         for episode_idx, episode in enumerate(self.gameplay_data):
+            # Check if episode is a dictionary with 'steps'
+            if not isinstance(episode, dict) or 'steps' not in episode:
+                print(f"Warning: Episode {episode_idx} does not have the expected format. Skipping...")
+                continue
+            
+            # Check if steps is a list
+            if not isinstance(episode['steps'], list):
+                print(f"Warning: Steps in episode {episode_idx} is not a list. Skipping...")
+                continue
+            
             trajectory = {
                 'episode': episode_idx,
                 'steps': []
             }
             
+            # Process each step
             for step_idx, step in enumerate(episode['steps']):
-                # For each step, we need:
-                # - state (prompt)
-                # - outputs (completions)
-                # - rewards
+                # Check if step is a dictionary
+                if not isinstance(step, dict):
+                    print(f"Warning: Step {step_idx} in episode {episode_idx} is not a dictionary. Skipping...")
+                    continue
                 
-                # In our collected data, we only have one completion per step
-                # For GRPO, we need multiple completions, but we can use what we have
-                # as a starting point and let the optimizer collect more during training
+                # Get the prompt and completion
+                prompt = step.get('prompt', '')
+                completion = step.get('completion', '')
                 
+                # Get the reward (default to 0 if not present)
+                reward = step.get('reward', 0.0)
+                
+                # Create step data
                 step_data = {
                     'step': step_idx,
-                    'state': step['prompt'],
-                    'states': [step['prompt']],  # Same prompt for all samples
-                    'outputs': [step['completion']],  # Just one completion for now
-                    'rewards': [step['reward']],  # Just one reward for now
+                    'state': prompt,
+                    'states': [prompt],  # Same prompt for all samples
+                    'outputs': [completion],  # Just one completion for now
+                    'rewards': [reward],  # Just one reward for now
                 }
                 
                 trajectory['steps'].append(step_data)
             
-            trajectories.append(trajectory)
+            # Only add trajectories with steps
+            if len(trajectory['steps']) > 0:
+                trajectories.append(trajectory)
+        
+        print(f"Converted {len(trajectories)} episodes with {sum(len(t['steps']) for t in trajectories)} total steps")
+        
+        # Verify the format
+        if len(trajectories) > 0:
+            print("Sample trajectory format:")
+            print(f"  Episode: {trajectories[0]['episode']}")
+            print(f"  Number of steps: {len(trajectories[0]['steps'])}")
+            if len(trajectories[0]['steps']) > 0:
+                step = trajectories[0]['steps'][0]
+                print(f"  Sample step:")
+                print(f"    Step index: {step['step']}")
+                print(f"    State: {step['state'][:50]}..." if step['state'] else "    State: (empty)")
+                print(f"    Outputs: {len(step['outputs'])} completions")
+                print(f"    Rewards: {step['rewards']}")
+        else:
+            print("Warning: No valid trajectories were created!")
         
         return trajectories

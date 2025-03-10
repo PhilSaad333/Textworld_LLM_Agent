@@ -23,8 +23,8 @@ class MyGRPOOptimizer:
         self.epsilon = config.epsilon if hasattr(config, 'epsilon') else 0.2  # PPO clipping parameter
         self.beta = config.beta if hasattr(config, 'beta') else 0.01  # KL penalty coefficient
         self.learning_rate = config.learning_rate if hasattr(config, 'learning_rate') else 5e-5
-        self.num_epochs = config.num_epochs if hasattr(config, 'num_epochs') else 4
-        self.batch_size = config.batch_size if hasattr(config, 'batch_size') else 16
+        self.num_epochs = config.num_epochs if hasattr(config, 'num_epochs') else 3
+        self.batch_size = config.batch_size if hasattr(config, 'batch_size') else 8
         self.max_grad_norm = config.max_grad_norm if hasattr(config, 'max_grad_norm') else 1.0
         
         # Reward function parameters
@@ -34,10 +34,16 @@ class MyGRPOOptimizer:
         self.room_penalty = config.room_penalty if hasattr(config, 'room_penalty') else -0.5
         self.gamma = config.gamma if hasattr(config, 'gamma') else 0.99  # Discount factor
         
+        # Training parameters
+        self.num_iterations = config.num_iterations if hasattr(config, 'num_iterations') else 3
+        self.num_episodes_per_iteration = config.num_episodes_per_iteration if hasattr(config, 'num_episodes_per_iteration') else 5
+        
         # Device
         self.device = config.device if hasattr(config, 'device') else "cuda" if torch.cuda.is_available() else "cpu"
         
         print(f"Initialized GRPO optimizer with {self.num_samples} samples, epsilon={self.epsilon}, beta={self.beta}")
+        print(f"Reward parameters: format_reward={self.format_reward}, format_penalty={self.format_penalty}, room_reward={self.room_reward}, room_penalty={self.room_penalty}")
+        print(f"Training for {self.num_epochs} epochs with batch size {self.batch_size} and learning rate {self.learning_rate}")
     
     def compute_advantages(self, trajectories):
         """
