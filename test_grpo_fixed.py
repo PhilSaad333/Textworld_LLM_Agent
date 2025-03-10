@@ -175,7 +175,7 @@ def main():
             
             # Agent parameters
             temperature=0.7,
-            use_map=True
+            use_map=False
         )
         
         # Print the config to verify all parameters are set

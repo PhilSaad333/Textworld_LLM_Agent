@@ -26,7 +26,7 @@ class GameType(Enum):
 @dataclass
 class ModelConfig:
     # Pretrained model settings
-    model_name: str = "FLAN-T5-BASE" #"TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_name: str = "google/flan-t5-large" #"FLAN-T5-BASE" #"TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     freeze_obs_base: bool = True
     unfreeze_last_n_obs_layers: int = 2
 
@@ -39,7 +39,7 @@ class ModelConfig:
     dropout: float = 0.1
 
     # Training/optimization
-    learning_rate: float = 1e-4
+    learning_rate: float = 8e-5  # Slightly reduced for larger model
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
 
@@ -89,7 +89,7 @@ class GameConfig:
 @dataclass
 class SFTConfig:
     # Model settings
-    model_name: str = "FLAN-T5-BASE"      #"TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_name: str = "google/flan-t5-large"      #"FLAN-T5-BASE" #"TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Layer freezing settings
@@ -97,8 +97,8 @@ class SFTConfig:
     unfreeze_last_n_layers: int = 2  # Number of layers to unfreeze from the end
     
     # Training hyperparameters
-    learning_rate: float = 5e-5  # Slightly higher learning rate for TinyLlama
-    batch_size: int = 16  # More conservative batch size
+    learning_rate: float = 3e-5  # Reduced learning rate for larger model
+    batch_size: int = 8  # Reduced batch size for larger model
     num_epochs: int = 1  # We'll run multiple epochs manually with tag checking
     warmup_steps: int = 100
     weight_decay: float = 0.01
@@ -113,8 +113,8 @@ class SFTConfig:
     scheduler_type: str = "linear"  # linear warmup with decay
     
     # Training features
-    gradient_accumulation_steps: int = 2  # Use gradient accumulation for effective larger batch
-    mixed_precision: bool = False  # Disabled for simplicity
+    gradient_accumulation_steps: int = 4  # Increased for larger model
+    mixed_precision: bool = True  # Enabled for memory efficiency
     
     # Validation
     validation_split: float = 0.1  # 10% of data for validation
