@@ -55,14 +55,36 @@ class MyGRPOOptimizer:
             Dictionary mapping (trajectory_idx, step_idx) to a list of advantages
         """
         advantages_dict = {}
+        all_rewards = []
         
+        # First pass: collect all rewards
+        for trajectory in trajectories:
+            for step in trajectory["steps"]:
+                rewards = step.get("rewards", [0.0])
+                all_rewards.extend(rewards)
+        
+        # Compute mean and std of rewards for normalization
+        if all_rewards:
+            rewards_mean = sum(all_rewards) / len(all_rewards)
+            rewards_std = (sum((r - rewards_mean) ** 2 for r in all_rewards) / len(all_rewards)) ** 0.5
+            
+            # Avoid division by zero
+            if rewards_std < 1e-8:
+                rewards_std = 1.0
+        else:
+            rewards_mean = 0.0
+            rewards_std = 1.0
+        
+        print(f"Rewards statistics: mean={rewards_mean:.4f}, std={rewards_std:.4f}")
+        
+        # Second pass: compute normalized advantages
         for traj_idx, trajectory in enumerate(tqdm(trajectories, desc="Computing advantages")):
             for step_idx, step in enumerate(trajectory["steps"]):
                 # Get rewards for this step
                 rewards = step.get("rewards", [0.0])
                 
-                # Compute advantage as the reward (no baseline for now)
-                advantages = rewards
+                # Normalize rewards to get advantages
+                advantages = [(r - rewards_mean) / rewards_std for r in rewards]
                 
                 # Store advantages in the dictionary
                 advantages_dict[(traj_idx, step_idx)] = advantages
@@ -74,12 +96,12 @@ class MyGRPOOptimizer:
         Compute PPO loss
         
         Args:
-            logprobs: Log probabilities of the current policy
-            old_logprobs: Log probabilities of the old policy
-            advantages: Advantages
+            logprobs: Log probabilities of the current policy (already averaged over tokens)
+            old_logprobs: Log probabilities of the old policy (already averaged over tokens)
+            advantages: Advantages for each completion
             
         Returns:
-            PPO loss
+            PPO loss (averaged over completions)
         """
         # Compute ratio between new and old policies
         ratio = torch.exp(logprobs - old_logprobs)
@@ -92,25 +114,38 @@ class MyGRPOOptimizer:
         surrogate2 = clipped_ratio * advantages
         
         # Take the minimum (pessimistic bound)
-        ppo_loss = -torch.min(surrogate1, surrogate2).mean()
+        # This implements the F term in the GRPO objective
+        ppo_values = torch.min(surrogate1, surrogate2)
+        
+        # Average over completions (G in the GRPO paper)
+        # This implements the 1/G sum_a term in the GRPO objective
+        ppo_loss = -ppo_values.mean()
         
         return ppo_loss
     
     def _compute_kl_penalty(self, logprobs, old_logprobs):
         """
-        Compute KL divergence penalty
+        Compute KL divergence penalty using the formula:
+        D_KL = exp(old_logprobs - logprobs) - (old_logprobs - logprobs) - 1
         
         Args:
-            logprobs: Log probabilities of the current policy
-            old_logprobs: Log probabilities of the old policy
+            logprobs: Log probabilities of the current policy (already averaged over tokens)
+            old_logprobs: Log probabilities of the old policy (already averaged over tokens)
             
         Returns:
-            KL divergence penalty
+            KL divergence penalty (averaged over completions)
         """
-        # Compute KL divergence
-        kl = (old_logprobs - logprobs).mean()
+        # Compute delta of log probabilities
+        delta_lp = old_logprobs - logprobs
         
-        return kl
+        # Compute KL divergence: exp(delta_lp) - delta_lp - 1
+        kl_div = torch.exp(delta_lp) - delta_lp - 1.0
+        
+        # Average over completions (G in the GRPO paper)
+        # This implements the 1/G sum_a term in the GRPO objective
+        kl_penalty = kl_div.mean()
+        
+        return kl_penalty
     
     def optimize(self, agent, trajectories):
         """
@@ -129,9 +164,11 @@ class MyGRPOOptimizer:
         print("Computing advantages for trajectories...")
         advantages_dict = self.compute_advantages(trajectories)
         
-        # Prepare data for training
-        train_data = []
-        for trajectory in tqdm(trajectories, desc="Computing advantages"):
+        # Prepare data for training, maintaining the structure of prompts and completions
+        # Each entry in structured_data is a prompt with its G completions and advantages
+        structured_data = []
+        
+        for trajectory in tqdm(trajectories, desc="Preparing data"):
             for step in trajectory["steps"]:
                 state = step["state"]
                 outputs = step["outputs"]
@@ -141,21 +178,19 @@ class MyGRPOOptimizer:
                 traj_idx = trajectory["episode"]
                 advantages = advantages_dict.get((traj_idx, step_idx), [0.0] * len(outputs))
                 
-                # Add each output as a separate training example
-                for i, output in enumerate(outputs):
-                    advantage = advantages[i] if i < len(advantages) else 0.0
-                    train_data.append({
-                        "state": state,
-                        "output": output,
-                        "advantage": advantage
-                    })
+                # Create a data point with the prompt and all its completions
+                structured_data.append({
+                    "state": state,
+                    "outputs": outputs,
+                    "advantages": advantages
+                })
         
-        # Shuffle the data
-        random.shuffle(train_data)
+        # Shuffle the prompts (but keep completions together)
+        random.shuffle(structured_data)
         
-        # Create batches
-        batch_size = self.batch_size
-        batches = [train_data[i:i+batch_size] for i in range(0, len(train_data), batch_size)]
+        # Create batches of B prompts
+        batch_size = self.batch_size  # B in the GRPO paper
+        batches = [structured_data[i:i+batch_size] for i in range(0, len(structured_data), batch_size)]
         
         # Set up optimizer
         optimizer = torch.optim.AdamW(
@@ -167,7 +202,13 @@ class MyGRPOOptimizer:
         metrics = {
             "loss": [],
             "ppo_loss": [],
-            "kl_penalty": []
+            "kl_penalty": [],
+            "ratio_mean": [],
+            "ratio_min": [],
+            "ratio_max": [],
+            "advantage_mean": [],
+            "advantage_min": [],
+            "advantage_max": []
         }
         
         # Make sure model is in training mode
@@ -179,74 +220,100 @@ class MyGRPOOptimizer:
             epoch_loss = 0.0
             epoch_ppo_loss = 0.0
             epoch_kl_penalty = 0.0
+            epoch_ratio_mean = 0.0
+            epoch_ratio_min = float('inf')
+            epoch_ratio_max = float('-inf')
+            epoch_advantage_mean = 0.0
+            epoch_advantage_min = float('inf')
+            epoch_advantage_max = float('-inf')
             
-            for batch in tqdm(batches, desc=f"Epoch {epoch+1}"):
-                # Prepare batch data
-                states = [item["state"] for item in batch]
-                outputs = [item["output"] for item in batch]
-                advantages = torch.tensor([item["advantage"] for item in batch], dtype=torch.float32).to(self.device)
+            for batch_idx, batch in enumerate(tqdm(batches, desc=f"Epoch {epoch+1}")):
+                batch_loss = 0.0
+                batch_ppo_loss = 0.0
+                batch_kl_penalty = 0.0
+                batch_ratios = []
+                batch_advantages = []
                 
-                # Tokenize inputs and outputs
-                inputs = agent.tokenizer(
-                    states,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=self.config.max_input_length if hasattr(self.config, 'max_input_length') else 512,
-                    return_tensors="pt"
-                ).to(self.device)
-                
-                # Get old log probabilities
-                old_logprobs_list = []
-                
-                for i, output in enumerate(outputs):
-                    # Tokenize output
-                    output_tokens = agent.tokenizer(
-                        output,
+                # Process each prompt in the batch
+                for prompt_data in batch:
+                    state = prompt_data["state"]
+                    outputs = prompt_data["outputs"]
+                    advantages = torch.tensor(prompt_data["advantages"], dtype=torch.float32).to(self.device)
+                    
+                    # Track advantages for debugging
+                    batch_advantages.extend(prompt_data["advantages"])
+                    
+                    # Tokenize the prompt once
+                    inputs = agent.tokenizer(
+                        state,
                         padding="max_length",
                         truncation=True,
-                        max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
+                        max_length=self.config.max_input_length if hasattr(self.config, 'max_input_length') else 512,
                         return_tensors="pt"
                     ).to(self.device)
                     
-                    # Get log probabilities for the output (without gradients)
-                    old_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, i, with_grad=False)
-                    old_logprobs_list.append(old_logprobs)
-                
-                # Combine old log probabilities
-                old_logprobs = torch.cat(old_logprobs_list, dim=0)
-                
-                # Compute new log probabilities and policy loss
-                optimizer.zero_grad()
-                
-                new_logprobs_list = []
-                for i, output in enumerate(outputs):
-                    # Tokenize output
-                    output_tokens = agent.tokenizer(
-                        output,
-                        padding="max_length",
-                        truncation=True,
-                        max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
-                        return_tensors="pt"
-                    ).to(self.device)
+                    # Get old log probabilities for all completions
+                    old_logprobs_list = []
                     
-                    # Get log probabilities for the output (with gradients)
-                    new_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, i, with_grad=True)
-                    new_logprobs_list.append(new_logprobs)
-                
-                # Combine new log probabilities
-                new_logprobs = torch.cat(new_logprobs_list, dim=0)
-                
-                # Compute PPO loss
-                ppo_loss = self._compute_ppo_loss(new_logprobs, old_logprobs, advantages)
-                
-                # Compute KL penalty
-                kl_penalty = self._compute_kl_penalty(new_logprobs, old_logprobs)
-                
-                # Compute total loss
-                loss = ppo_loss + self.beta * kl_penalty
-                
-                # Backward pass
-                loss.backward()
+                    for i, output in enumerate(outputs):
+                        # Tokenize output
+                        output_tokens = agent.tokenizer(
+                            output,
+                            padding="max_length",
+                            truncation=True,
+                            max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
+                            return_tensors="pt"
+                        ).to(self.device)
+                        
+                        # Get log probabilities for the output (without gradients)
+                        old_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, 0, with_grad=False)
+                        old_logprobs_list.append(old_logprobs)
+                    
+                    # Combine old log probabilities
+                    old_logprobs = torch.cat(old_logprobs_list, dim=0)
+                    
+                    # Compute new log probabilities and policy loss
+                    optimizer.zero_grad()
+                    
+                    new_logprobs_list = []
+                    for i, output in enumerate(outputs):
+                        # Tokenize output
+                        output_tokens = agent.tokenizer(
+                            output,
+                            padding="max_length",
+                            truncation=True,
+                            max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
+                            return_tensors="pt"
+                        ).to(self.device)
+                        
+                        # Get log probabilities for the output (with gradients)
+                        new_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, 0, with_grad=True)
+                        new_logprobs_list.append(new_logprobs)
+                    
+                    # Combine new log probabilities
+                    new_logprobs = torch.cat(new_logprobs_list, dim=0)
+                    
+                    # Debug ratios
+                    with torch.no_grad():
+                        ratios = torch.exp(new_logprobs - old_logprobs)
+                        batch_ratios.extend(ratios.cpu().numpy().tolist())
+                    
+                    # Compute PPO loss for this prompt (average over its completions)
+                    prompt_ppo_loss = self._compute_ppo_loss(new_logprobs, old_logprobs, advantages)
+                    
+                    # Compute KL penalty for this prompt (average over its completions)
+                    prompt_kl_penalty = self._compute_kl_penalty(new_logprobs, old_logprobs)
+                    
+                    # Compute total loss for this prompt
+                    prompt_loss = prompt_ppo_loss + self.beta * prompt_kl_penalty
+                    
+                    # Accumulate losses for the batch
+                    batch_loss += prompt_loss.item()
+                    batch_ppo_loss += prompt_ppo_loss.item()
+                    batch_kl_penalty += prompt_kl_penalty.item()
+                    
+                    # Backward pass for this prompt
+                    prompt_loss.backward()
                 
                 # Clip gradients
                 torch.nn.utils.clip_grad_norm_(agent.model.parameters(), self.max_grad_norm)
@@ -254,22 +321,71 @@ class MyGRPOOptimizer:
                 # Update model
                 optimizer.step()
                 
-                # Update metrics
-                epoch_loss += loss.item()
-                epoch_ppo_loss += ppo_loss.item()
-                epoch_kl_penalty += kl_penalty.item()
+                # Compute batch statistics
+                batch_size = len(batch)
+                if batch_size > 0:
+                    # Average losses over prompts in the batch
+                    avg_batch_loss = batch_loss / batch_size
+                    avg_batch_ppo_loss = batch_ppo_loss / batch_size
+                    avg_batch_kl_penalty = batch_kl_penalty / batch_size
+                    
+                    # Update epoch metrics
+                    epoch_loss += avg_batch_loss
+                    epoch_ppo_loss += avg_batch_ppo_loss
+                    epoch_kl_penalty += avg_batch_kl_penalty
+                    
+                    # Compute ratio statistics
+                    if batch_ratios:
+                        ratio_mean = sum(batch_ratios) / len(batch_ratios)
+                        ratio_min = min(batch_ratios)
+                        ratio_max = max(batch_ratios)
+                        
+                        epoch_ratio_mean += ratio_mean
+                        epoch_ratio_min = min(epoch_ratio_min, ratio_min)
+                        epoch_ratio_max = max(epoch_ratio_max, ratio_max)
+                    
+                    # Compute advantage statistics
+                    if batch_advantages:
+                        adv_mean = sum(batch_advantages) / len(batch_advantages)
+                        adv_min = min(batch_advantages)
+                        adv_max = max(batch_advantages)
+                        
+                        epoch_advantage_mean += adv_mean
+                        epoch_advantage_min = min(epoch_advantage_min, adv_min)
+                        epoch_advantage_max = max(epoch_advantage_max, adv_max)
+                    
+                    # Print batch metrics every 10 batches
+                    if batch_idx % 10 == 0:
+                        print(f"  Batch {batch_idx}/{len(batches)}: Loss={avg_batch_loss:.4f}, PPO={avg_batch_ppo_loss:.4f}, KL={avg_batch_kl_penalty:.4f}")
+                        print(f"  Advantages: mean={adv_mean:.4f}, min={adv_min:.4f}, max={adv_max:.4f}")
+                        print(f"  Ratios: mean={ratio_mean:.4f}, min={ratio_min:.4f}, max={ratio_max:.4f}")
             
             # Compute average metrics for the epoch
-            avg_loss = epoch_loss / len(batches)
-            avg_ppo_loss = epoch_ppo_loss / len(batches)
-            avg_kl_penalty = epoch_kl_penalty / len(batches)
+            num_batches = len(batches)
+            avg_loss = epoch_loss / num_batches
+            avg_ppo_loss = epoch_ppo_loss / num_batches
+            avg_kl_penalty = epoch_kl_penalty / num_batches
+            avg_ratio_mean = epoch_ratio_mean / num_batches
+            avg_ratio_min = epoch_ratio_min
+            avg_ratio_max = epoch_ratio_max
+            avg_advantage_mean = epoch_advantage_mean / num_batches
+            avg_advantage_min = epoch_advantage_min
+            avg_advantage_max = epoch_advantage_max
             
             # Add to metrics
             metrics["loss"].append(avg_loss)
             metrics["ppo_loss"].append(avg_ppo_loss)
             metrics["kl_penalty"].append(avg_kl_penalty)
+            metrics["ratio_mean"].append(avg_ratio_mean)
+            metrics["ratio_min"].append(avg_ratio_min)
+            metrics["ratio_max"].append(avg_ratio_max)
+            metrics["advantage_mean"].append(avg_advantage_mean)
+            metrics["advantage_min"].append(avg_advantage_min)
+            metrics["advantage_max"].append(avg_advantage_max)
             
             print(f"Epoch {epoch+1}/{self.num_epochs} - Loss: {avg_loss:.4f}, PPO Loss: {avg_ppo_loss:.4f}, KL Penalty: {avg_kl_penalty:.4f}")
+            print(f"  Ratios: mean={avg_ratio_mean:.4f}, min={avg_ratio_min:.4f}, max={avg_ratio_max:.4f}")
+            print(f"  Advantages: mean={avg_advantage_mean:.4f}, min={avg_advantage_min:.4f}, max={avg_advantage_max:.4f}")
         
         # Set model back to evaluation mode
         agent.model.eval()
@@ -381,7 +497,7 @@ class MyGRPOOptimizer:
             with_grad: Whether to compute gradients (True for new policy, False for old policy)
             
         Returns:
-            Log probabilities for the output sequence
+            Log probability for the output sequence (averaged over tokens)
         """
         # Get input for this example
         input_ids = inputs.input_ids[batch_idx:batch_idx+1]
@@ -451,7 +567,8 @@ class MyGRPOOptimizer:
                 token_log_prob = log_probs[0, i, output_ids[i+1]]
                 token_log_probs.append(token_log_prob)
         
-        # Combine token log probabilities
+        # Combine token log probabilities by averaging over tokens
+        # This implements the 1/|o^a_t| factor in the GRPO objective
         if token_log_probs:
             return torch.stack(token_log_probs).mean().unsqueeze(0)
         else:
