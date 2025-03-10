@@ -118,29 +118,57 @@ class TextWorldRLTrainer:
         self.agent.device = self.device  # Explicitly set the agent's device
         self.agent.training_mode = False  # Set back to False for normal operation
         
-        # Configure GRPO
-        self.grpo_config = GRPOConfig(
-            learning_rate=rl_config.learning_rate,
-            per_device_train_batch_size=rl_config.batch_size,
-            gradient_accumulation_steps=rl_config.gradient_accumulation_steps if hasattr(rl_config, 'gradient_accumulation_steps') else 4,
-            max_completion_length=rl_config.max_output_length if hasattr(rl_config, 'max_output_length') else 128,
-            max_prompt_length=rl_config.max_input_length if hasattr(rl_config, 'max_input_length') else 512,
-            num_train_epochs=rl_config.num_epochs,
-            logging_steps=rl_config.log_steps if hasattr(rl_config, 'log_steps') else 10,
-            save_steps=rl_config.save_steps if hasattr(rl_config, 'save_steps') else 100,
-            output_dir=rl_config.checkpoint_dir,
-            remove_unused_columns=False,
-            gradient_checkpointing=True,
-            optim="adamw_torch",
-            seed=42,
-            # GRPO specific parameters
-            beta=rl_config.beta if hasattr(rl_config, 'beta') else 0.1,  # KL penalty coefficient
-            use_vllm=rl_config.use_vllm if hasattr(rl_config, 'use_vllm') else False,
-            temperature=rl_config.temperature if hasattr(rl_config, 'temperature') else 0.7,
-            num_generations=rl_config.num_generations if hasattr(rl_config, 'num_generations') else 4,
-            report_to=[],
-        )
-
+        # Initialize optimizer
+        self.optimizer_type = getattr(self.config, 'optimizer_type', 'custom')  # 'custom' or 'huggingface'
+        
+        if self.optimizer_type == 'huggingface':
+            try:
+                from trl import PPOConfig, PPOTrainer
+                print("Using Hugging Face's PPO implementation")
+                
+                # Initialize Hugging Face PPO trainer
+                ppo_config = PPOConfig(
+                    learning_rate=self.config.learning_rate,
+                    batch_size=self.config.batch_size,
+                    mini_batch_size=self.config.mini_batch_size if hasattr(self.config, 'mini_batch_size') else 4,
+                    gradient_accumulation_steps=self.config.gradient_accumulation_steps if hasattr(self.config, 'gradient_accumulation_steps') else 1,
+                    optimize_cuda_cache=True,
+                    early_stopping=self.config.early_stopping if hasattr(self.config, 'early_stopping') else False,
+                    target_kl=self.config.target_kl if hasattr(self.config, 'target_kl') else 0.1,
+                    ppo_epochs=self.config.ppo_epochs if hasattr(self.config, 'ppo_epochs') else 4,
+                    clip_range=self.config.clip_range if hasattr(self.config, 'clip_range') else 0.2,
+                    vf_coef=self.config.vf_coef if hasattr(self.config, 'vf_coef') else 0.1,
+                    horizon=self.config.horizon if hasattr(self.config, 'horizon') else 10000,
+                    target=self.config.target if hasattr(self.config, 'target') else 6,
+                    init_kl_coef=self.config.init_kl_coef if hasattr(self.config, 'init_kl_coef') else 0.2,
+                    adap_kl_ctrl=self.config.adap_kl_ctrl if hasattr(self.config, 'adap_kl_ctrl') else True,
+                )
+                
+                self.ppo_trainer = PPOTrainer(
+                    config=ppo_config,
+                    model=self.agent.model,
+                    ref_model=None,  # Will be set during training
+                    tokenizer=self.agent.tokenizer,
+                    dataset=None,  # Will be set during training
+                    data_collator=None,  # Will be set during training
+                )
+                
+            except ImportError:
+                print("Warning: trl package not found. Falling back to custom GRPO implementation.")
+                self.optimizer_type = 'custom'
+        
+        if self.optimizer_type == 'custom':
+            from training.optimizer import MyGRPOOptimizer
+            print("Using custom GRPO implementation")
+            
+            # Initialize custom GRPO optimizer
+            self.grpo_optimizer = MyGRPOOptimizer(self.config)
+        
+        # Initialize gameplay data
+        self.gameplay_data = []
+        
+        print(f"Initialized TextWorldRLTrainer with {self.optimizer_type} optimizer")
+        
     def collect_gameplay_data(self, difficulties=None, episodes_per_difficulty=5):
         """Collect gameplay data for training"""
         if difficulties is None:
@@ -664,57 +692,166 @@ class TextWorldRLTrainer:
         return dataset
     
     def train(self, use_saved_data=False, data_path=None, save_model_path=None):
-        """Train the model using GRPO
+        """
+        Train the agent using RL
         
         Args:
-            use_saved_data: Whether to use saved gameplay data instead of collecting new data
-            data_path: Path to the saved gameplay data (if None, uses the last saved path)
-            save_model_path: Path to save the model after training (default: checkpoint_dir/rl_model_timestamp)
-        """
-        # Get training data
-        if use_saved_data:
-            train_dataset = self.load_gameplay_data(data_path)
-        else:
-            train_dataset = self.collect_gameplay_data()
-        
-        # Set model to training mode
-        self.model.train()
-        
-        # Import our custom trainer
-        from training.custom_grpo_trainer import CustomGRPOTrainer
-        
-        # Ensure batch size is compatible with num_generations
-        # The GRPO trainer expects batch_size to be divisible by num_generations
-        batch_size = self.grpo_config.per_device_train_batch_size
-        num_generations = self.grpo_config.num_generations
-        
-        if batch_size % num_generations != 0:
-            # Find the largest multiple of num_generations that's <= batch_size
-            new_batch_size = (batch_size // num_generations) * num_generations
-            if new_batch_size == 0:
-                new_batch_size = num_generations
+            use_saved_data: Whether to use saved gameplay data
+            data_path: Path to saved gameplay data
+            save_model_path: Path to save the trained model
             
-            print(f"Adjusting batch size from {batch_size} to {new_batch_size} to ensure compatibility with num_generations={num_generations}")
-            self.grpo_config.per_device_train_batch_size = new_batch_size
+        Returns:
+            Dictionary with training metrics
+        """
+        print("Starting RL training...")
         
-        # Initialize our custom GRPO trainer
-        trainer = CustomGRPOTrainer(
-            model=self.model,
-            reward_funcs=self.reward_function,
-            args=self.grpo_config,
-            train_dataset=train_dataset,
-            processing_class=self.tokenizer,
-        )
+        # Load or collect gameplay data
+        if use_saved_data and data_path:
+            print(f"Loading gameplay data from {data_path}")
+            self.gameplay_data = self.load_gameplay_data(data_path)
+        else:
+            print("Collecting gameplay data...")
+            difficulties = self.config.difficulties if hasattr(self.config, 'difficulties') else [1, 2, 3]
+            episodes_per_difficulty = self.config.episodes_per_difficulty if hasattr(self.config, 'episodes_per_difficulty') else 5
+            self.gameplay_data = self.collect_gameplay_data(difficulties, episodes_per_difficulty)
+        
+        print(f"Collected {len(self.gameplay_data)} gameplay episodes")
+        
+        # Train using the appropriate optimizer
+        if self.optimizer_type == 'huggingface':
+            return self._train_with_huggingface(save_model_path)
+        else:
+            return self._train_with_custom_grpo(save_model_path)
+    
+    def _train_with_huggingface(self, save_model_path=None):
+        """
+        Train the agent using Hugging Face's PPO implementation
+        
+        Args:
+            save_model_path: Path to save the trained model
+            
+        Returns:
+            Dictionary with training metrics
+        """
+        from trl import PPOTrainer
+        
+        print("Training with Hugging Face's PPO implementation...")
+        
+        # Convert gameplay data to the format expected by Hugging Face's PPO trainer
+        ppo_dataset = self._convert_data_for_huggingface()
+        
+        # Set the dataset for the PPO trainer
+        self.ppo_trainer.dataset = ppo_dataset
         
         # Train the model
-        trainer.train()
+        metrics = self.ppo_trainer.train()
         
-        # Save the model
-        if save_model_path is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_model_path = os.path.join(self.grpo_config.output_dir, f"rl_model_{timestamp}")
+        # Save the model if a path is provided
+        if save_model_path:
+            self.ppo_trainer.save_model(save_model_path)
+            print(f"Model saved to {save_model_path}")
         
-        trainer.save_model(save_model_path)
-        print(f"Model saved to {save_model_path}")
+        return metrics
+    
+    def _train_with_custom_grpo(self, save_model_path=None):
+        """
+        Train the agent using our custom GRPO implementation
         
-        return save_model_path
+        Args:
+            save_model_path: Path to save the trained model
+            
+        Returns:
+            Dictionary with training metrics
+        """
+        print("Training with custom GRPO implementation...")
+        
+        # Convert gameplay data to trajectories format expected by our GRPO optimizer
+        trajectories = self._convert_data_for_custom_grpo()
+        
+        # Set up environment for training
+        if self.env_manager:
+            env = self.env_manager.get_environment()
+        else:
+            # Create a simple environment if env_manager is not available
+            import textworld
+            env = textworld.start(self.config.game_file)
+        
+        # Get training parameters
+        num_iterations = self.config.num_iterations if hasattr(self.config, 'num_iterations') else 5
+        num_episodes_per_iteration = self.config.num_episodes_per_iteration if hasattr(self.config, 'num_episodes_per_iteration') else 5
+        max_steps = self.config.max_steps if hasattr(self.config, 'max_steps') else 10
+        
+        # Train using our custom GRPO optimizer with pre-collected trajectories
+        metrics = self.grpo_optimizer.train(
+            agent=self.agent,
+            env=env,
+            num_iterations=num_iterations,
+            num_episodes_per_iteration=num_episodes_per_iteration,
+            max_steps=max_steps,
+            save_path=save_model_path,
+            trajectories=trajectories  # Pass pre-collected trajectories
+        )
+        
+        return metrics
+    
+    def _convert_data_for_huggingface(self):
+        """
+        Convert gameplay data to the format expected by Hugging Face's PPO trainer
+        
+        Returns:
+            Dataset in the format expected by Hugging Face's PPO trainer
+        """
+        # This is a placeholder - you'll need to implement the actual conversion
+        # based on the specific requirements of Hugging Face's PPO trainer
+        
+        # Example structure (modify as needed):
+        ppo_dataset = []
+        
+        for episode in self.gameplay_data:
+            for step in episode['steps']:
+                ppo_dataset.append({
+                    'query': step['prompt'],
+                    'response': step['completion'],
+                    'reward': step['reward']
+                })
+        
+        return ppo_dataset
+    
+    def _convert_data_for_custom_grpo(self):
+        """
+        Convert gameplay data to the format expected by our custom GRPO optimizer
+        
+        Returns:
+            List of trajectories in the format expected by our GRPO optimizer
+        """
+        trajectories = []
+        
+        for episode_idx, episode in enumerate(self.gameplay_data):
+            trajectory = {
+                'episode': episode_idx,
+                'steps': []
+            }
+            
+            for step_idx, step in enumerate(episode['steps']):
+                # For each step, we need:
+                # - state (prompt)
+                # - outputs (completions)
+                # - rewards
+                
+                # In our collected data, we only have one completion per step
+                # For GRPO, we need multiple completions, but we can use what we have
+                # as a starting point and let the optimizer collect more during training
+                
+                step_data = {
+                    'step': step_idx,
+                    'state': step['prompt'],
+                    'states': [step['prompt']],  # Same prompt for all samples
+                    'outputs': [step['completion']],  # Just one completion for now
+                    'rewards': [step['reward']],  # Just one reward for now
+                }
+                
+                trajectory['steps'].append(step_data)
+            
+            trajectories.append(trajectory)
+        
+        return trajectories

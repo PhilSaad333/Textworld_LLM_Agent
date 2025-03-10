@@ -26,7 +26,7 @@ class GameType(Enum):
 @dataclass
 class ModelConfig:
     # Pretrained model settings
-    model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_name: str = "FLAN-T5-BASE" #"TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     freeze_obs_base: bool = True
     unfreeze_last_n_obs_layers: int = 2
 
@@ -89,7 +89,7 @@ class GameConfig:
 @dataclass
 class SFTConfig:
     # Model settings
-    model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_name: str = "FLAN-T5-BASE"      #"TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Layer freezing settings
