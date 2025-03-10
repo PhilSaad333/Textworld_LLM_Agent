@@ -158,7 +158,10 @@ class MyGRPOOptimizer:
         batches = [train_data[i:i+batch_size] for i in range(0, len(train_data), batch_size)]
         
         # Set up optimizer
-        optimizer = torch.optim.AdamW(agent.model.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.AdamW(
+            [p for p in agent.model.parameters() if p.requires_grad],
+            lr=self.learning_rate
+        )
         
         # Training metrics
         metrics = {
@@ -167,7 +170,7 @@ class MyGRPOOptimizer:
             "kl_penalty": []
         }
         
-        # Move model to device
+        # Make sure model is in training mode
         agent.model.train()
         agent.model.to(self.device)
         
@@ -193,22 +196,21 @@ class MyGRPOOptimizer:
                 ).to(self.device)
                 
                 # Get old log probabilities
-                with torch.no_grad():
-                    old_logprobs_list = []
+                old_logprobs_list = []
+                
+                for i, output in enumerate(outputs):
+                    # Tokenize output
+                    output_tokens = agent.tokenizer(
+                        output,
+                        padding="max_length",
+                        truncation=True,
+                        max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
+                        return_tensors="pt"
+                    ).to(self.device)
                     
-                    for i, output in enumerate(outputs):
-                        # Tokenize output
-                        output_tokens = agent.tokenizer(
-                            output,
-                            padding="max_length",
-                            truncation=True,
-                            max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
-                            return_tensors="pt"
-                        ).to(self.device)
-                        
-                        # Get log probabilities for the output
-                        old_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, i)
-                        old_logprobs_list.append(old_logprobs)
+                    # Get log probabilities for the output (without gradients)
+                    old_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, i, with_grad=False)
+                    old_logprobs_list.append(old_logprobs)
                 
                 # Combine old log probabilities
                 old_logprobs = torch.cat(old_logprobs_list, dim=0)
@@ -227,8 +229,8 @@ class MyGRPOOptimizer:
                         return_tensors="pt"
                     ).to(self.device)
                     
-                    # Get log probabilities for the output
-                    new_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, i)
+                    # Get log probabilities for the output (with gradients)
+                    new_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, i, with_grad=True)
                     new_logprobs_list.append(new_logprobs)
                 
                 # Combine new log probabilities
@@ -367,7 +369,7 @@ class MyGRPOOptimizer:
             'metrics': metrics
         }, path)
     
-    def _compute_logprobs(self, model, inputs, output_tokens, batch_idx=0):
+    def _compute_logprobs(self, model, inputs, output_tokens, batch_idx=0, with_grad=False):
         """
         Compute log probabilities for a given output sequence
         
@@ -376,6 +378,7 @@ class MyGRPOOptimizer:
             inputs: Tokenized input sequence
             output_tokens: Tokenized output sequence
             batch_idx: Index in the batch
+            with_grad: Whether to compute gradients (True for new policy, False for old policy)
             
         Returns:
             Log probabilities for the output sequence
@@ -415,8 +418,13 @@ class MyGRPOOptimizer:
             model_inputs["decoder_input_ids"] = decoder_input_ids
         
         # Forward pass through the model
-        with torch.no_grad():
+        if with_grad:
+            # Compute with gradients for the new policy
             outputs = model(**model_inputs)
+        else:
+            # Compute without gradients for the old policy
+            with torch.no_grad():
+                outputs = model(**model_inputs)
             
         # Get logits
         logits = outputs.logits
