@@ -140,16 +140,8 @@ def main():
             room_reward: float = 0.5
             room_penalty: float = -0.5
             
-            # Training parameters for GRPO
-            num_iterations: int = 3
-            num_episodes_per_iteration: int = 5
-            
             # Optimizer type
             optimizer_type: str = 'custom'  # 'custom' or 'huggingface'
-            
-            # Maximum lengths for prompts and completions
-            max_input_length: int = 512
-            max_completion_length: int = 128
         
         # Initialize RL config with custom GRPO parameters
         rl_config = CustomRLConfig(
@@ -181,20 +173,9 @@ def main():
             room_reward=0.5,
             room_penalty=-0.5,
             
-            # Training parameters
-            num_iterations=3,
-            num_episodes_per_iteration=5,
-            
-            # Specify optimizer type
-            optimizer_type='custom',
-            
             # Agent parameters
             temperature=0.7,
-            use_map=True,
-            
-            # Maximum lengths for prompts and completions
-            max_input_length=512,
-            max_completion_length=128
+            use_map=True
         )
         
         # Print the config to verify all parameters are set
@@ -226,7 +207,7 @@ def main():
         # Add max_input_length and max_completion_length to main_config
         # This is a workaround to make the optimizer work
         main_config.max_input_length = rl_config.max_input_length
-        main_config.max_completion_length = rl_config.max_completion_length
+        main_config.max_completion_length = rl_config.max_output_length
         
         # Load and check the gameplay data
         print("\nLoading and checking gameplay data...")
@@ -236,7 +217,7 @@ def main():
             print("Error: Failed to load gameplay data. Exiting.")
             return
         
-        # Initialize the trainer with env_manager=None since we're using pre-collected data
+        # Initialize the trainer
         print("\nInitializing TextWorldRLTrainer...")
         trainer = TextWorldRLTrainer(
             rl_config=rl_config,
@@ -264,7 +245,7 @@ def main():
                 else:
                     print(f"{key}: {value}")
             
-            print(f"\nTrained model saved to {save_model_path}")
+            print(f"\nTrained model saved to {save_model_path}_final.pt")
             
         except Exception as e:
             print(f"Error during training: {e}")

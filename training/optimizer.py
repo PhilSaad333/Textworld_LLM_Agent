@@ -387,12 +387,32 @@ class MyGRPOOptimizer:
         # Get output for this example
         output_ids = output_tokens.input_ids[0]
         
+        # Check if we're using an encoder-decoder model (like T5) or a decoder-only model (like GPT)
+        is_encoder_decoder = getattr(model.config, "is_encoder_decoder", False)
+        
         # Prepare model inputs
         model_inputs = {
             "input_ids": input_ids,
         }
         if attention_mask is not None:
             model_inputs["attention_mask"] = attention_mask
+        
+        # For encoder-decoder models, we need to provide decoder inputs
+        if is_encoder_decoder:
+            # For computing log probs, we need to shift the output_ids to create decoder_input_ids
+            # The first token of decoder_input_ids is the decoder_start_token_id
+            # The rest are the output_ids except the last one
+            decoder_start_token_id = getattr(model.config, "decoder_start_token_id", None)
+            if decoder_start_token_id is None:
+                decoder_start_token_id = getattr(model.config, "pad_token_id", 0)
+            
+            # Create decoder_input_ids by shifting output_ids right and prepending decoder_start_token_id
+            decoder_input_ids = torch.cat([
+                torch.tensor([[decoder_start_token_id]], device=self.device),
+                output_ids[:-1].unsqueeze(0)
+            ], dim=1)
+            
+            model_inputs["decoder_input_ids"] = decoder_input_ids
         
         # Forward pass through the model
         with torch.no_grad():
@@ -406,11 +426,22 @@ class MyGRPOOptimizer:
         
         # Extract log probabilities for the actual output tokens
         token_log_probs = []
-        for i in range(len(output_ids) - 1):  # -1 because we don't need the last token's prediction
-            if output_ids[i+1] == model.config.pad_token_id:
-                continue  # Skip pad tokens
-            token_log_prob = log_probs[0, i, output_ids[i+1]]
-            token_log_probs.append(token_log_prob)
+        
+        if is_encoder_decoder:
+            # For encoder-decoder models, we compare each position in the output with the next token
+            for i in range(len(output_ids) - 1):  # -1 because we don't need the last token's prediction
+                if output_ids[i+1] == model.config.pad_token_id:
+                    continue  # Skip pad tokens
+                token_log_prob = log_probs[0, i, output_ids[i+1]]
+                token_log_probs.append(token_log_prob)
+        else:
+            # For decoder-only models, we need to handle differently
+            # This part remains the same as before
+            for i in range(len(output_ids) - 1):  # -1 because we don't need the last token's prediction
+                if output_ids[i+1] == model.config.pad_token_id:
+                    continue  # Skip pad tokens
+                token_log_prob = log_probs[0, i, output_ids[i+1]]
+                token_log_probs.append(token_log_prob)
         
         # Combine token log probabilities
         if token_log_probs:
