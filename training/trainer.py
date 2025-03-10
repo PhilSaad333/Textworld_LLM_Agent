@@ -25,6 +25,13 @@ class TextWorldRLTrainer:
             use_map: Whether to use the map tool in the agent
         """
         self.config = rl_config
+        self.grpo_config = rl_config  # Set grpo_config to be the same as config for consistency
+        
+        # Ensure max_prompt_length and max_completion_length are set
+        if not hasattr(self.grpo_config, 'max_prompt_length'):
+            self.grpo_config.max_prompt_length = self.grpo_config.max_input_length if hasattr(self.grpo_config, 'max_input_length') else 512
+        if not hasattr(self.grpo_config, 'max_completion_length'):
+            self.grpo_config.max_completion_length = self.grpo_config.max_output_length if hasattr(self.grpo_config, 'max_output_length') else 128
         
         # Create or use main config
         if main_config is None:
@@ -180,7 +187,7 @@ class TextWorldRLTrainer:
         all_episode_data = []
         
         # Number of completions to generate per prompt
-        num_generations = self.grpo_config.num_generations
+        num_generations = self.config.num_generations if hasattr(self.config, 'num_generations') else self.config.num_samples if hasattr(self.config, 'num_samples') else 6
         
         # Ensure model is on the correct device before starting
         self.model = self.model.to(self.device)
@@ -190,6 +197,9 @@ class TextWorldRLTrainer:
         total_output_tokens = 0
         max_input_tokens = 0
         max_output_tokens = 0
+        
+        # Store token counts for each completion
+        completion_token_counts = []
 
         # Iterate over difficulties
         for difficulty in difficulties:
@@ -227,8 +237,8 @@ class TextWorldRLTrainer:
                     max_input_tokens = max(max_input_tokens, input_token_count)
 
                     # Log warning if input is close to or exceeds max length
-                    if hasattr(self.grpo_config, 'max_prompt_length') and input_token_count >= self.grpo_config.max_prompt_length - 10:
-                        print(f"⚠️ Input length ({input_token_count} tokens) close to max ({self.grpo_config.max_prompt_length})")
+                    if hasattr(self.config, 'max_prompt_length') and input_token_count >= self.config.max_prompt_length - 10:
+                        print(f"⚠️ Input length ({input_token_count} tokens) close to max ({self.config.max_prompt_length})")
 
                     # Generate G completions
                     completions = []
@@ -241,7 +251,7 @@ class TextWorldRLTrainer:
                     with torch.no_grad():
                         outputs = self.model.generate(
                             **inputs,
-                            max_new_tokens=self.grpo_config.max_completion_length if hasattr(self.grpo_config, 'max_completion_length') else 128,
+                            max_new_tokens=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
                             min_length=20,
                             num_return_sequences=num_generations,
                             num_beams=num_generations,  # Use beam search to get diverse completions
@@ -272,8 +282,8 @@ class TextWorldRLTrainer:
                         max_output_tokens = max(max_output_tokens, output_token_count)
                         
                         # Log warning if output is close to max length
-                        if hasattr(self.grpo_config, 'max_completion_length') and output_token_count >= self.grpo_config.max_completion_length - 10:
-                            print(f"⚠️ Output length ({output_token_count} tokens) close to max ({self.grpo_config.max_completion_length})")
+                        if hasattr(self.config, 'max_completion_length') and output_token_count >= self.config.max_completion_length - 10:
+                            print(f"⚠️ Output length ({output_token_count} tokens) close to max ({self.config.max_completion_length})")
                     
                     # Do rollouts for each completion to get rewards
                     rollout_rewards = []
@@ -377,7 +387,8 @@ class TextWorldRLTrainer:
         dataset = {
             "prompt": [],
             "completion": [],
-            "reward": []
+            "reward": [],
+            "completion_token_count": []  # Add this new key to store token counts
         }
         
         # Flatten episode data into prompt-completion-reward triples
@@ -388,6 +399,14 @@ class TextWorldRLTrainer:
                     dataset["prompt"].append(prompt)
                     dataset["completion"].append(completion)
                     dataset["reward"].append(step["rewards"][i])
+                    
+                    # Add token count for this completion
+                    if "completion_token_counts" in step and i < len(step["completion_token_counts"]):
+                        dataset["completion_token_count"].append(step["completion_token_counts"][i])
+                    else:
+                        # If token count not available, estimate it
+                        token_count = len(self.tokenizer.encode(completion))
+                        dataset["completion_token_count"].append(token_count)
         
         # Print statistics
         print(f"\nCollected {len(all_episode_data)} episodes with {len(dataset['prompt'])} prompt-completion pairs")
