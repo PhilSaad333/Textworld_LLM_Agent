@@ -476,7 +476,7 @@ class MyGRPOOptimizer:
         
         Args:
             agent: TextWorldLLMAgent instance
-            env: TextWorld environment
+            env: TextWorld environment (can be None if trajectories are provided)
             num_iterations: Number of training iterations
             num_episodes_per_iteration: Number of episodes to collect per iteration
             max_steps: Maximum steps per episode
@@ -521,6 +521,10 @@ class MyGRPOOptimizer:
             return all_metrics
         
         # Otherwise, collect trajectories and train iteratively
+        # Check if environment is provided
+        if env is None:
+            raise ValueError("Environment must be provided when no pre-collected trajectories are available")
+            
         for iteration in range(num_iterations):
             print(f"\nIteration {iteration+1}/{num_iterations}")
             

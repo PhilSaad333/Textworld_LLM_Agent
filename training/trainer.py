@@ -768,13 +768,8 @@ class TextWorldRLTrainer:
         # Convert gameplay data to trajectories format expected by our GRPO optimizer
         trajectories = self._convert_data_for_custom_grpo()
         
-        # Set up environment for training
-        if self.env_manager:
-            env = self.env_manager.get_environment()
-        else:
-            # Create a simple environment if env_manager is not available
-            import textworld
-            env = textworld.start(self.config.game_file if hasattr(self.config, 'game_file') else None)
+        # We don't need an environment when using pre-collected trajectories
+        env = None
         
         # Get training parameters from config
         num_iterations = self.config.num_iterations if hasattr(self.config, 'num_iterations') else 3
@@ -792,7 +787,7 @@ class TextWorldRLTrainer:
         # Train using our custom GRPO optimizer with pre-collected trajectories
         metrics = self.grpo_optimizer.train(
             agent=self.agent,
-            env=env,
+            env=env,  # This can be None when using pre-collected trajectories
             num_iterations=num_iterations,
             num_episodes_per_iteration=num_episodes_per_iteration,
             max_steps=max_steps,
