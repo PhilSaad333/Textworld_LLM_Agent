@@ -148,7 +148,7 @@ def main():
             optimizer_type: str = 'custom'  # 'custom' or 'huggingface'
             
             # Maximum lengths for prompts and completions
-            max_prompt_length: int = 512
+            max_input_length: int = 512
             max_completion_length: int = 128
         
         # Initialize RL config with custom GRPO parameters
@@ -193,7 +193,7 @@ def main():
             use_map=True,
             
             # Maximum lengths for prompts and completions
-            max_prompt_length=512,
+            max_input_length=512,
             max_completion_length=128
         )
         
@@ -222,6 +222,11 @@ def main():
             game_config=game_config,
             model_config=model_config
         )
+        
+        # Add max_input_length and max_completion_length to main_config
+        # This is a workaround to make the optimizer work
+        main_config.max_input_length = rl_config.max_input_length
+        main_config.max_completion_length = rl_config.max_completion_length
         
         # Load and check the gameplay data
         print("\nLoading and checking gameplay data...")

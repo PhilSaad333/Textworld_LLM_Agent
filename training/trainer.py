@@ -755,7 +755,7 @@ class TextWorldRLTrainer:
     
     def _train_with_custom_grpo(self, save_model_path=None):
         """
-        Train the agent using our custom GRPO implementation
+        Train the agent using our custom GRPO implementation with pre-collected data
         
         Args:
             save_model_path: Path to save the trained model
@@ -768,31 +768,19 @@ class TextWorldRLTrainer:
         # Convert gameplay data to trajectories format expected by our GRPO optimizer
         trajectories = self._convert_data_for_custom_grpo()
         
-        # We don't need an environment when using pre-collected trajectories
-        env = None
-        
-        # Get training parameters from config
-        num_iterations = self.config.num_iterations if hasattr(self.config, 'num_iterations') else 3
-        num_episodes_per_iteration = self.config.num_episodes_per_iteration if hasattr(self.config, 'num_episodes_per_iteration') else 5
-        max_steps = self.config.max_steps if hasattr(self.config, 'max_steps') else 10
+        if not trajectories:
+            raise ValueError("No valid trajectories found. Please check your gameplay data.")
         
         # Print training parameters
-        print(f"Training with parameters:")
-        print(f"  num_iterations: {num_iterations}")
-        print(f"  num_episodes_per_iteration: {num_episodes_per_iteration}")
-        print(f"  max_steps: {max_steps}")
-        print(f"  save_path: {save_model_path}")
+        print(f"Training with pre-collected data:")
         print(f"  trajectories: {len(trajectories)} episodes with {sum(len(t['steps']) for t in trajectories)} total steps")
+        print(f"  save_path: {save_model_path}")
         
         # Train using our custom GRPO optimizer with pre-collected trajectories
         metrics = self.grpo_optimizer.train(
             agent=self.agent,
-            env=env,  # This can be None when using pre-collected trajectories
-            num_iterations=num_iterations,
-            num_episodes_per_iteration=num_episodes_per_iteration,
-            max_steps=max_steps,
-            save_path=save_model_path,
-            trajectories=trajectories  # Pass pre-collected trajectories
+            trajectories=trajectories,  # Pass pre-collected trajectories
+            save_path=save_model_path
         )
         
         return metrics
