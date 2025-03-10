@@ -510,11 +510,11 @@ class TextWorldRLTrainer:
             
             # Check command tags
             if not format_check_result["has_command_tags"]:
-                format_reward += self.config.format_failure_penalty / 2  # Half penalty for missing command tags
+                format_reward += self.config.format_penalty / 2  # Half penalty for missing command tags
             
             # Check room tags
             if not format_check_result["has_room_tags"]:
-                format_reward += self.config.format_failure_penalty / 2  # Half penalty for missing room tags
+                format_reward += self.config.format_penalty / 2  # Half penalty for missing room tags
             
             rewards.append(format_reward)
         
@@ -617,8 +617,8 @@ class TextWorldRLTrainer:
             "enhancement_timestamp": timestamp,
             "original_data_path": data_path,
             "model_source": self.model.config.name_or_path,
-            "format_failure_penalty": self.config.format_failure_penalty if hasattr(self.config, 'format_failure_penalty') else None,
-            "room_prediction_penalty": self.config.room_prediction_penalty if hasattr(self.config, 'room_prediction_penalty') else None,
+            "format_penalty": self.config.format_penalty if hasattr(self.config, 'format_penalty') else None,
+            "room_penalty": self.config.room_penalty if hasattr(self.config, 'room_penalty') else None,
             "description": "Enhanced gameplay data with additional statistics"
         }
         

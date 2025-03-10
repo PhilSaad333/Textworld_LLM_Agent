@@ -43,7 +43,7 @@ class MyGRPOOptimizer:
         # Print hyperparameters
         print(f"Initialized GRPO optimizer with {self.num_samples} samples, epsilon={self.epsilon}, beta={self.beta}")
         print(f"Reward parameters: format_reward={self.format_reward}, format_penalty={self.format_penalty}, room_reward={self.room_reward}, room_penalty={self.room_penalty}")
-    
+        
     def compute_advantages(self, trajectories):
         """
         Compute advantages for each step in the trajectories
@@ -146,7 +146,7 @@ class MyGRPOOptimizer:
         kl_penalty = kl_div.mean()
         
         return kl_penalty
-    
+        
     def optimize(self, agent, trajectories):
         """
         Optimize the policy using GRPO
