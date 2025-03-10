@@ -191,9 +191,6 @@ class TextWorldRLTrainer:
         max_input_tokens = 0
         max_output_tokens = 0
 
-        # Import the Rollout class
-        from training.rollout import Rollout
-
         # Iterate over difficulties
         for difficulty in difficulties:
             print(f"Collecting data for difficulty {difficulty}")
@@ -230,7 +227,7 @@ class TextWorldRLTrainer:
                     max_input_tokens = max(max_input_tokens, input_token_count)
 
                     # Log warning if input is close to or exceeds max length
-                    if input_token_count >= self.grpo_config.max_prompt_length - 10:
+                    if hasattr(self.grpo_config, 'max_prompt_length') and input_token_count >= self.grpo_config.max_prompt_length - 10:
                         print(f"⚠️ Input length ({input_token_count} tokens) close to max ({self.grpo_config.max_prompt_length})")
 
                     # Generate G completions
@@ -244,7 +241,7 @@ class TextWorldRLTrainer:
                     with torch.no_grad():
                         outputs = self.model.generate(
                             **inputs,
-                            max_new_tokens=self.grpo_config.max_completion_length,
+                            max_new_tokens=self.grpo_config.max_completion_length if hasattr(self.grpo_config, 'max_completion_length') else 128,
                             min_length=20,
                             num_return_sequences=num_generations,
                             num_beams=num_generations,  # Use beam search to get diverse completions
@@ -275,7 +272,7 @@ class TextWorldRLTrainer:
                         max_output_tokens = max(max_output_tokens, output_token_count)
                         
                         # Log warning if output is close to max length
-                        if output_token_count >= self.grpo_config.max_completion_length - 10:
+                        if hasattr(self.grpo_config, 'max_completion_length') and output_token_count >= self.grpo_config.max_completion_length - 10:
                             print(f"⚠️ Output length ({output_token_count} tokens) close to max ({self.grpo_config.max_completion_length})")
                     
                     # Do rollouts for each completion to get rewards
@@ -313,21 +310,10 @@ class TextWorldRLTrainer:
                     
                     episode_data.append(step_data)
                     
-                    # Choose action to take in the environment
-                    # First, check which completions have valid command tags
+                    # Check format and extract action directly without creating temporary rollouts
                     valid_command_indices = []
                     for i, completion in enumerate(completions):
-                        # Create a temporary rollout to check format
-                        temp_rollout = Rollout(
-                            model=self.model,
-                            tokenizer=self.tokenizer,
-                            device=self.device,
-                            env=env,
-                            agent=self.agent,
-                            action_history=action_history,
-                            completion=completion
-                        )
-                        format_check = temp_rollout.agent.check_format(completion)
+                        format_check = self.agent.check_format(completion)
                         if format_check["has_command_tags"]:
                             valid_command_indices.append(i)
                     
@@ -344,23 +330,8 @@ class TextWorldRLTrainer:
                         chosen_completion = completions[best_completion_idx]
                         print("No completions with valid command tags, choosing based on reward")
                     
-                    # Create a rollout for the chosen completion to get the action
-                    chosen_rollout = Rollout(
-                        model=self.model,
-                        tokenizer=self.tokenizer,
-                        device=self.device,
-                        env=env,
-                        agent=self.agent,
-                        action_history=action_history,
-                        completion=chosen_completion
-                    )
-                    
-                    # Extract the action (without running the rollout)
-                    valid_actions = [
-                        a for a in infos["admissible_commands"]
-                        if a.lower() not in ['inventory', 'look']
-                    ]
-                    action_info = chosen_rollout.extract_action_from_completion(chosen_completion, valid_actions)
+                    # Extract action directly without creating another rollout
+                    action_info = self.agent.extract_action_from_completion(chosen_completion, valid_actions)
                     action = action_info.get('action', None)
                     
                     # If action is invalid, choose a random valid action
@@ -384,7 +355,6 @@ class TextWorldRLTrainer:
                     # Check if episode was completed successfully
                     if done:
                         episode_success = (reward > 0)
-                        
                     
                     # Update for next step
                     obs, infos = next_obs, next_infos
@@ -399,56 +369,37 @@ class TextWorldRLTrainer:
                 all_episode_data.append({
                     "steps": episode_data,
                     "success": episode_success,
-                    "difficulty": difficulty
+                    "difficulty": difficulty,
+                    "num_steps": len(episode_data)
                 })
         
-        # Print token statistics
-        print("\n===== Token Count Statistics =====")
-        print(f"Total episodes: {len(all_episode_data)}")
-        print(f"Input tokens - Total: {total_input_tokens}, Max: {max_input_tokens}")
-        print(f"Output tokens - Total: {total_output_tokens}, Max: {max_output_tokens}")
-        print("=================================\n")
-        
-        # Convert to dataset format expected by GRPO
-        # We need to flatten the episode data into a list of prompts, completions, and rewards
-        all_prompts = []
-        all_completions = []
-        all_rewards = []
-        all_completion_token_counts = []
-        
-        for episode in all_episode_data:
-            for step in episode["steps"]:
-                # For each step, add G entries to the dataset (one for each completion)
-                for i in range(len(step["completions"])):
-                    all_prompts.append(step["prompt"])
-                    all_completions.append(step["completions"][i])
-                    all_rewards.append(step["rewards"][i])
-                    all_completion_token_counts.append(step["completion_token_counts"][i])
-        
-        # Create dataset
-        dataset_dict = {
-            "prompt": all_prompts,
-            "completion": all_completions,
-            "reward": all_rewards,
-            "completion_token_count": all_completion_token_counts
+        # Prepare dataset for training
+        dataset = {
+            "prompt": [],
+            "completion": [],
+            "reward": []
         }
         
-        # Store the raw episode data for potential future use
+        # Flatten episode data into prompt-completion-reward triples
+        for episode in all_episode_data:
+            for step in episode["steps"]:
+                prompt = step["prompt"]
+                for i, completion in enumerate(step["completions"]):
+                    dataset["prompt"].append(prompt)
+                    dataset["completion"].append(completion)
+                    dataset["reward"].append(step["rewards"][i])
+        
+        # Print statistics
+        print(f"\nCollected {len(all_episode_data)} episodes with {len(dataset['prompt'])} prompt-completion pairs")
+        print(f"Average input tokens: {total_input_tokens / len(dataset['prompt']):.1f}")
+        print(f"Average output tokens: {total_output_tokens / len(dataset['completion']):.1f}")
+        print(f"Max input tokens: {max_input_tokens}")
+        print(f"Max output tokens: {max_output_tokens}")
+        
+        # Store episode data for later use
         self.episode_data = all_episode_data
         
-        # After collecting data
-        avg_completion_tokens = sum(sum(step["completion_token_counts"]) / len(step["completion_token_counts"]) 
-                                   for step in episode_data) / len(episode_data)
-        max_completion_tokens = max(max(step["completion_token_counts"]) for step in episode_data)
-
-        print(f"Average completion tokens: {avg_completion_tokens:.1f}")
-        print(f"Maximum completion tokens: {max_completion_tokens}")
-
-        # Check for potential truncation
-        if max_completion_tokens > self.config.max_output_length * 0.9:
-            print(f"WARNING: Some completions are approaching the maximum length ({max_completion_tokens}/{self.config.max_output_length})")
-        
-        return Dataset.from_dict(dataset_dict)
+        return dataset
     
     
     def reward_function(self, completions, reward=None, **kwargs):

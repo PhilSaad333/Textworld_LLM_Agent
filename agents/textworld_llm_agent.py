@@ -702,7 +702,10 @@ Your response:"""
         return 1 - (distance / max_len) if max_len > 0 else 1
 
     def get_action_fast(self, env, obs, infos, valid_actions, step=0):
-        """Get next action using LLM with simplified generation settings for rollouts."""
+        """Get next action using LLM with simplified generation settings for rollouts.
+        Returns:
+            tuple: (action, info_dict) where action is the chosen action and info_dict is an empty dict
+        """
         clean_obs = self._clean_observation(obs)
         current_room = self._get_room_name(obs)
         
@@ -749,11 +752,11 @@ Your response:"""
         if result["action"] is None:
             # If no valid action found, use a fallback
             if valid_actions:
-                return valid_actions[0]  # Just take the first valid action
+                return valid_actions[0], {}  # Return tuple with empty dict
             else:
-                return "look"  # Fallback to look if no valid actions
+                return "look", {}  # Return tuple with empty dict
         
-        return result["action"]
+        return result["action"], {}  # Return tuple with empty dict
 
     def check_format(self, text):
         """
