@@ -263,6 +263,18 @@ def patched_init(self, rl_config, main_config=None, model_path=None, use_map=Tru
 # Apply the monkey patch
 TextWorldRLTrainer.__init__ = patched_init
 
+# Monkey patch the TextWorldLLMAgent.get_action_fast method to fix the "too many values to unpack (expected 2)" error
+from agents.textworld_llm_agent import TextWorldLLMAgent
+original_get_action_fast = TextWorldLLMAgent.get_action_fast
+
+def patched_get_action_fast(self, env, obs, infos, valid_actions, step=0):
+    """Patched version of get_action_fast that returns a tuple of (action, {}) to match the expected return value."""
+    action = original_get_action_fast(self, env, obs, infos, valid_actions, step)
+    return action, {}  # Return a tuple of (action, {}) instead of just the action
+
+# Apply the monkey patch
+TextWorldLLMAgent.get_action_fast = patched_get_action_fast
+
 # Initialize the trainer
 print("\nInitializing TextWorldRLTrainer...")
 trainer = TextWorldRLTrainer(
