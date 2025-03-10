@@ -26,7 +26,7 @@ class GameType(Enum):
 @dataclass
 class ModelConfig:
     # Pretrained model settings
-    model_name: str = "EleutherAI/pythia-410m-deduped"
+    model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     freeze_obs_base: bool = True
     unfreeze_last_n_obs_layers: int = 2
 
@@ -89,13 +89,17 @@ class GameConfig:
 @dataclass
 class SFTConfig:
     # Model settings
-    model_name: str = "EleutherAI/pythia-410m-deduped"
+    model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     
+    # Layer freezing settings
+    freeze_layers: bool = True  # Whether to freeze most layers
+    unfreeze_last_n_layers: int = 2  # Number of layers to unfreeze from the end
+    
     # Training hyperparameters
-    learning_rate: float = 2e-5
-    batch_size: int = 8
-    num_epochs: int = 3
+    learning_rate: float = 5e-5  # Slightly higher learning rate for TinyLlama
+    batch_size: int = 16  # More conservative batch size
+    num_epochs: int = 1  # We'll run multiple epochs manually with tag checking
     warmup_steps: int = 100
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
@@ -109,8 +113,8 @@ class SFTConfig:
     scheduler_type: str = "linear"  # linear warmup with decay
     
     # Training features
-    gradient_accumulation_steps: int = 4
-    mixed_precision: bool = True  # Use mixed precision training
+    gradient_accumulation_steps: int = 2  # Use gradient accumulation for effective larger batch
+    mixed_precision: bool = False  # Disabled for simplicity
     
     # Validation
     validation_split: float = 0.1  # 10% of data for validation
@@ -130,6 +134,10 @@ class SFTConfig:
     # Data processing
     num_workers: int = 4  # Number of workers for data loading
     pin_memory: bool = True  # Pin memory for faster data transfer to GPU
+    
+    # Tag checking
+    check_tags: bool = True  # Whether to check for command and room tags
+    tag_check_samples: int = 20  # Number of samples to check for tags
     
     def __post_init__(self):
         """Validate and process config after initialization"""
