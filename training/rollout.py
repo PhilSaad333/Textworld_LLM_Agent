@@ -297,15 +297,15 @@ class Rollout:
                 
                 # Apply partial penalties based on what's missing
                 if not self.format_check_result.get("has_command_tags", False):
-                    format_penalty += config.format_failure_penalty / 2
+                    format_penalty += config.format_penalty / 2
                 
                 if not self.format_check_result.get("has_room_tags", False):
-                    format_penalty += config.format_failure_penalty / 2
+                    format_penalty += config.format_penalty / 2
                     
                 total_reward += format_penalty
             else:
                 # If we don't have detailed info, apply full penalty
-                total_reward += config.format_failure_penalty
+                total_reward += config.format_penalty
         
         # Room prediction penalty - apply if prediction is incorrect or missing
         if hasattr(config, 'room_prediction_penalty') and config.room_prediction_penalty < 0:
