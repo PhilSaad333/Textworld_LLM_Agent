@@ -48,8 +48,12 @@ class Rollout:
         cloned_agent.device = self.device
         
         # Copy the agent's state
-        if hasattr(agent, 'goal'):
+        if hasattr(agent, 'goal') and agent.goal is not None:
             cloned_agent.goal = agent.goal
+        else:
+            # If the original agent doesn't have a goal set, we'll set it later in run()
+            cloned_agent.goal = None
+            
         if hasattr(agent, 'last_known_room'):
             cloned_agent.last_known_room = agent.last_known_room or "Unknown Room"
         if hasattr(agent, 'known_rooms'):
@@ -143,6 +147,11 @@ class Rollout:
             # Replay action history to get to current state
             for past_action in self.action_history:
                 obs, _, _, infos = self.env.step(past_action)
+            
+            # Ensure the agent has a goal set
+            if self.agent.goal is None or self.agent.goal == "Not set":
+                self.agent.goal = self.agent.parse_goal(obs)
+                print(f"Rollout: Set goal: {self.agent.goal}")
             
             # Get valid actions
             valid_actions = [

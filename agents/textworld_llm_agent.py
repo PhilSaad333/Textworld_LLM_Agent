@@ -4,7 +4,7 @@ import re
 import numpy as np
 
 class TextWorldLLMAgent:
-    def __init__(self, config, training_mode=False, model_path=None, use_map=False):
+    def __init__(self, config, training_mode=False, model_path=None, use_map=False, eval_config=None):
         """
         Initialize LLM-based TextWorld agent
         
@@ -13,10 +13,26 @@ class TextWorldLLMAgent:
             training_mode: If True, enables batch processing and disables debug output
             model_path: Optional path to a fine-tuned model checkpoint
             use_map: If True, use the map tool to track room connections
+            eval_config: Optional evaluation configuration to override the one in config
         """
         self.config = config
         self.training_mode = training_mode
         self.use_map = use_map
+        
+        # Handle eval_config
+        if eval_config is not None:
+            # If eval_config is provided directly, use it
+            from config.config import EvalConfig
+            if isinstance(eval_config, dict):
+                # Convert dict to EvalConfig
+                self.config.eval_config = EvalConfig(**eval_config)
+            else:
+                # Use provided EvalConfig
+                self.config.eval_config = eval_config
+        elif not hasattr(self.config, 'eval_config'):
+            # If no eval_config in config, create a default one
+            from config.config import EvalConfig
+            self.config.eval_config = EvalConfig()
         
         # Initialize map tool if enabled
         if self.use_map:
@@ -334,10 +350,6 @@ Your response:"""
             # Single input processing - original logic
             clean_obs = self._clean_observation(obs)
             
-            #if not self.training_mode:
-            #    print("\nDEBUG - get_action called")
-            #    print(f"DEBUG - Current observation (cleaned): {clean_obs[:100]}...")
-            
             if self.goal is None or self.goal == "Not set":
                 self.goal = self.parse_goal(clean_obs)
                 
@@ -355,52 +367,42 @@ Your response:"""
             max_attempts = 3 if not self.training_mode else 1
             format_failures = 0
             
+            # Check if we have evaluation config
+            has_eval_config = hasattr(self.config, 'eval_config')
+            
             for attempt in range(max_attempts):
                 prompt = self.format_prompt(obs, valid_actions, current_room)
                 
-                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+                # Generate completions using the new generate_response method
+                completions = self.generate_response(
+                    prompt,
+                    num_beams=self.config.eval_config.num_beams if has_eval_config else 5,
+                    num_return_sequences=self.config.eval_config.num_return_sequences if has_eval_config else 1,
+                    do_sample=self.config.eval_config.do_sample if has_eval_config else True,
+                    temperature=self.config.eval_config.temperature if has_eval_config else 0.7,
+                    top_p=self.config.eval_config.top_p if has_eval_config else 0.9,
+                    top_k=self.config.eval_config.top_k if has_eval_config else 50
+                )
                 
-                # Different generation approach for autoregressive vs seq2seq models
-                if self.is_autoregressive:
-                    # For autoregressive models like GPT-2
-                    attention_mask = inputs.get('attention_mask', None)
-                    outputs = self.model.generate(
-                        inputs.input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=256,
-                        min_length=len(inputs.input_ids[0]) + 20,  # Original + at least 20 new tokens
-                        num_beams=5,
-                        temperature=0.7,
-                        do_sample=True,
-                        no_repeat_ngram_size=3,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id,
-                        early_stopping=True
-                    )
-                    # For autoregressive models, we need to remove the input prompt from the output
-                    full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
-                    # Extract only the generated part (remove the input prompt)
-                    input_length = len(self.tokenizer.decode(inputs.input_ids[0], skip_special_tokens=False))
-                    full_response = full_response[input_length:].strip()
-                else:
-                    # For seq2seq models like T5
-                    outputs = self.model.generate(
-                        **inputs,
-                        max_new_tokens=256,
-                        min_length=20,
-                        num_beams=5,
-                        temperature=0.7,
-                        do_sample=True,
-                        no_repeat_ngram_size=3,
-                        early_stopping=True
-                    )
-                    full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
+                # Print completions if requested in eval_config
+                if has_eval_config and self.config.eval_config.print_completions:
+                    print("\n=== Generated Completions ===")
+                    for i, completion in enumerate(completions):
+                        print(f"Completion {i+1}:\n{completion}\n")
                 
-                # Remove <pad> token if present
-                full_response = full_response.replace("<pad>", "").strip()
+                # Process the first completion (or select based on eval_config)
+                full_response = completions[0]
                 
                 # Check format using the check_format function
                 format_check = self.check_format(full_response)
+                
+                # Print format check if requested in eval_config
+                if has_eval_config and self.config.eval_config.print_format_check:
+                    print("\n=== Format Check ===")
+                    print(f"Has command tags: {format_check['has_command_tags']}")
+                    print(f"Has room tags: {format_check['has_room_tags']}")
+                    print(f"Command: {format_check['command']}")
+                    print(f"Room: {format_check['room']}")
                 
                 if format_check["has_command_tags"] and format_check["has_room_tags"]:
                     action = format_check["command"]
@@ -423,6 +425,12 @@ Your response:"""
                         if self.use_map and action in valid_actions:
                             # Map will be updated in update_state_after_action
                             pass
+                        
+                        # Print action selection if requested in eval_config
+                        if has_eval_config and self.config.eval_config.print_action_selection:
+                            print(f"\n=== Selected Action ===")
+                            print(f"Action: {action}")
+                            print(f"Predicted Room: {predicted_room}")
                         
                         return action, {"predicted_room": predicted_room, "format_check": format_check}
                     else:
@@ -707,6 +715,12 @@ Your response:"""
             tuple: (action, info_dict) where action is the chosen action and info_dict is an empty dict
         """
         clean_obs = self._clean_observation(obs)
+        
+        # Ensure the goal is set
+        if self.goal is None or self.goal == "Not set":
+            self.goal = self.parse_goal(obs)
+            print(f"get_action_fast: Set goal: {self.goal}")
+            
         current_room = self._get_room_name(obs)
         
         prompt = self.format_prompt(obs, valid_actions, current_room)
@@ -828,6 +842,99 @@ Your response:"""
         from training.custom_grpo_trainer import CustomGRPOTrainer
         
         # Rest of the method...
+
+    def generate_response(self, prompt, num_beams=None, num_return_sequences=None, 
+                     do_sample=None, temperature=None, top_p=None, top_k=None):
+        """
+        Generate response(s) for a given prompt with specified generation parameters.
+        
+        Args:
+            prompt: The formatted prompt to generate completions for
+            num_beams: Number of beams for beam search (default: from eval_config or 1)
+            num_return_sequences: Number of sequences to return (default: from eval_config or 1)
+            do_sample: Whether to use sampling (default: from eval_config or False)
+            temperature: Temperature for sampling (default: from eval_config or 0.7)
+            top_p: Top-p for nucleus sampling (default: from eval_config or 0.9)
+            top_k: Top-k for top-k sampling (default: from eval_config or 50)
+            
+        Returns:
+            list: List of generated completions
+        """
+        # Use eval_config values if provided, otherwise use defaults
+        has_eval_config = hasattr(self.config, 'eval_config')
+        
+        num_beams = num_beams or (self.config.eval_config.num_beams if has_eval_config else 1)
+        num_return_sequences = num_return_sequences or (self.config.eval_config.num_return_sequences if has_eval_config else 1)
+        do_sample = do_sample if do_sample is not None else (self.config.eval_config.do_sample if has_eval_config else False)
+        temperature = temperature or (self.config.eval_config.temperature if has_eval_config else 0.7)
+        top_p = top_p or (self.config.eval_config.top_p if has_eval_config else 0.9)
+        top_k = top_k or (self.config.eval_config.top_k if has_eval_config else 50)
+        
+        # Ensure num_return_sequences <= num_beams
+        num_return_sequences = min(num_return_sequences, num_beams)
+        
+        # Generate completions
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        
+        # Different generation approach for autoregressive vs seq2seq models
+        if self.is_autoregressive:
+            # For autoregressive models like GPT-2
+            attention_mask = inputs.get('attention_mask', None)
+            outputs = self.model.generate(
+                inputs.input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=256,
+                min_length=len(inputs.input_ids[0]) + 20,  # Original + at least 20 new tokens
+                num_beams=num_beams,
+                num_return_sequences=num_return_sequences,
+                temperature=temperature,
+                do_sample=do_sample,
+                top_p=top_p,
+                top_k=top_k if do_sample else None,
+                no_repeat_ngram_size=3,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                early_stopping=True,
+                return_dict_in_generate=True,
+                output_scores=True
+            )
+            
+            # Process completions
+            completions = []
+            for i in range(num_return_sequences):
+                # For autoregressive models, we need to remove the input prompt from the output
+                full_response = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=False)
+                # Extract only the generated part (remove the input prompt)
+                input_length = len(self.tokenizer.decode(inputs.input_ids[0], skip_special_tokens=False))
+                completion = full_response[input_length:].strip()
+                completion = completion.replace("<pad>", "").strip()
+                completions.append(completion)
+        else:
+            # For seq2seq models like T5
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=256,
+                min_length=20,
+                num_beams=num_beams,
+                num_return_sequences=num_return_sequences,
+                temperature=temperature,
+                do_sample=do_sample,
+                top_p=top_p,
+                top_k=top_k if do_sample else None,
+                no_repeat_ngram_size=3,
+                early_stopping=True,
+                return_dict_in_generate=True,
+                output_scores=True
+            )
+            
+            # Process completions
+            completions = []
+            for i in range(num_return_sequences):
+                completion = self.tokenizer.decode(outputs.sequences[i], skip_special_tokens=False)
+                completion = completion.replace("<pad>", "").strip()
+                completions.append(completion)
+        
+        return completions
 
 class MapTool:
     def __init__(self):

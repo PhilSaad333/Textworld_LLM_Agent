@@ -175,7 +175,7 @@ class TextWorldRLTrainer:
         self.gameplay_data = []
         
         print(f"Initialized TextWorldRLTrainer with {self.optimizer_type} optimizer")
-        
+
     def collect_gameplay_data(self, difficulties=None, episodes_per_difficulty=5):
         """Collect gameplay data for training"""
         if difficulties is None:
@@ -197,7 +197,7 @@ class TextWorldRLTrainer:
         total_output_tokens = 0
         max_input_tokens = 0
         max_output_tokens = 0
-        
+
         # Store token counts for each completion
         completion_token_counts = []
 
@@ -218,6 +218,11 @@ class TextWorldRLTrainer:
                 # Reset the agent and initialize known_rooms
                 self.agent.reset()
                 self.agent.known_rooms = set()
+                
+                # Explicitly parse and set the goal from the initial observation
+                if self.agent.goal is None or self.agent.goal == "Not set":
+                    self.agent.goal = self.agent.parse_goal(obs)
+                    print(f"Set goal: {self.agent.goal}")
 
                 while not done and len(episode_data) < self.config.max_steps:
                     # Get valid actions

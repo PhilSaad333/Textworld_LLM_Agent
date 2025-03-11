@@ -24,6 +24,55 @@ class GameType(Enum):
 
 
 @dataclass
+class EvalConfig:
+    """Configuration for model evaluation and testing"""
+    
+    # Generation parameters
+    num_beams: int = 1                # Number of beams for beam search
+    num_return_sequences: int = 1     # Number of sequences to return
+    do_sample: bool = False           # Whether to use sampling
+    temperature: float = 0.7          # Temperature for sampling
+    top_p: float = 0.9                # Top-p for nucleus sampling
+    top_k: int = 50                   # Top-k for top-k sampling
+    
+    # Evaluation behavior
+    print_completions: bool = False   # Whether to print all completions
+    print_format_check: bool = False  # Whether to print format check results
+    print_action_selection: bool = False  # Whether to print action selection details
+    
+    # Action selection strategy
+    action_selection: str = "best_beam"  # Options: "best_beam", "best_format", "sample"
+    
+    # Logging
+    log_to_file: bool = False         # Whether to log to a file
+    log_path: str = None              # Path to log file
+    
+    # Evaluation metrics
+    track_success_rate: bool = True   # Whether to track success rate
+    track_steps_to_completion: bool = True  # Whether to track steps to completion
+    track_format_correctness: bool = True   # Whether to track format correctness
+    
+    def __post_init__(self):
+        """Initialize log path if logging is enabled"""
+        if self.log_to_file and self.log_path is None:
+            # Create a default log directory if none provided
+            os.makedirs("logs/eval", exist_ok=True)
+            self.log_path = "logs/eval/evaluation_log.txt"
+            
+    def get_beam_search_params(self):
+        """Get parameters for beam search generation"""
+        return {
+            "num_beams": self.num_beams,
+            "num_return_sequences": min(self.num_return_sequences, self.num_beams),
+            "do_sample": self.do_sample,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "top_k": self.top_k if self.do_sample else None
+        } 
+
+
+
+@dataclass
 class ModelConfig:
     # Pretrained model settings
     model_name: str = "google/flan-t5-large" #"FLAN-T5-BASE" #"TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -168,11 +217,14 @@ class TextWorldConfig:
     def __init__(self,
                  game_config: GameConfig,
                  model_config: ModelConfig,
-                 sft_config: SFTConfig = None):  # Add SFTConfig as optional parameter
+                 sft_config: SFTConfig = None,
+                 eval_config = None):  # Add EvalConfig as optional parameter
         self.game_config = game_config
         self.model_config = model_config
         self.sft_config = sft_config or SFTConfig()  # Use default if not provided
-
+        
+        # Use default EvalConfig if not provided
+        self.eval_config = eval_config or EvalConfig()  
         self.excluded_actions = ["look", "inventory"]
 
         self.requested_infos = textworld.EnvInfos(
@@ -239,7 +291,8 @@ class TextWorldConfig:
 def get_game_config(
     reward_type: RewardType,
     goal_type: GoalType,
-    max_history_actions: int = 3  # Add parameter with default
+    max_history_actions: int = 3,  # Add parameter with default
+    eval_config = None  # Add EvalConfig as optional parameter
 ) -> TextWorldConfig:
     game_config = GameConfig(
         reward_type=reward_type,
@@ -249,11 +302,16 @@ def get_game_config(
     )
     
     model_config = ModelConfig()
-    #training_config = TrainingConfig()
+    
+    # Import here to avoid circular imports if needed
+    if eval_config is not None and not isinstance(eval_config, object):
+        # No need to import EvalConfig since it's defined in this file
+        eval_config = EvalConfig(**eval_config) if isinstance(eval_config, dict) else eval_config
     
     return TextWorldConfig(
         game_config=game_config,
-        model_config=model_config
+        model_config=model_config,
+        eval_config=eval_config
     )
 def create_all_games():
     """Create all game variants with different reward and goal types"""

@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 
 class GameRunner:
-    def __init__(self, agent, env_manager, config, log_dir="logs/games"):
+    def __init__(self, agent, env_manager, config, log_dir="logs/games", eval_config=None):
         """
         Initialize game runner
         
@@ -13,12 +13,40 @@ class GameRunner:
             env_manager: Environment manager instance
             config: Game configuration
             log_dir: Directory to save game logs
+            eval_config: Optional evaluation configuration
         """
         self.agent = agent
         self.env_manager = env_manager
         self.config = config
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Handle eval_config
+        if eval_config is not None:
+            # If eval_config is provided directly, use it
+            from config.config import EvalConfig
+            if isinstance(eval_config, dict):
+                # Convert dict to EvalConfig
+                self.eval_config = EvalConfig(**eval_config)
+            else:
+                # Use provided EvalConfig
+                self.eval_config = eval_config
+                
+            # Update agent's eval_config
+            self.agent.config.eval_config = self.eval_config
+        elif hasattr(config, 'eval_config'):
+            # Use eval_config from config
+            self.eval_config = config.eval_config
+            
+            # Update agent's eval_config
+            self.agent.config.eval_config = self.eval_config
+        else:
+            # Create default eval_config
+            from config.config import EvalConfig
+            self.eval_config = EvalConfig()
+            
+            # Update agent's eval_config
+            self.agent.config.eval_config = self.eval_config
         
     def play_game(self, difficulty=1, log=True):
         """
