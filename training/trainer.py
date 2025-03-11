@@ -706,7 +706,7 @@ class TextWorldRLTrainer:
         
         return dataset
     
-    def train(self, use_saved_data=False, data_path=None, save_model_path=None):
+    def train(self, use_saved_data=False, data_path=None, save_model_path=None, save_each_epoch=False):
         """
         Train the agent using RL
         
@@ -714,6 +714,7 @@ class TextWorldRLTrainer:
             use_saved_data: Whether to use saved gameplay data
             data_path: Path to saved gameplay data
             save_model_path: Path to save the trained model
+            save_each_epoch: If True, save model after each epoch
             
         Returns:
             Dictionary with training metrics
@@ -736,7 +737,7 @@ class TextWorldRLTrainer:
         if self.optimizer_type == 'huggingface':
             return self._train_with_huggingface(save_model_path)
         else:
-            return self._train_with_custom_grpo(save_model_path)
+            return self._train_with_custom_grpo(save_model_path, save_each_epoch)
     
     def _train_with_huggingface(self, save_model_path=None):
         """
@@ -768,12 +769,13 @@ class TextWorldRLTrainer:
         
         return metrics
     
-    def _train_with_custom_grpo(self, save_model_path=None):
+    def _train_with_custom_grpo(self, save_model_path=None, save_each_epoch=False):
         """
         Train the agent using our custom GRPO implementation with pre-collected data
         
         Args:
             save_model_path: Path to save the trained model
+            save_each_epoch: If True, save model after each epoch with format "{save_model_path}_epoch_{epoch}.pt"
             
         Returns:
             Dictionary with training metrics
@@ -790,12 +792,14 @@ class TextWorldRLTrainer:
         print(f"Training with pre-collected data:")
         print(f"  trajectories: {len(trajectories)} episodes with {sum(len(t['steps']) for t in trajectories)} total steps")
         print(f"  save_path: {save_model_path}")
+        print(f"  save_each_epoch: {save_each_epoch}")
         
         # Train using our custom GRPO optimizer with pre-collected trajectories
         metrics = self.grpo_optimizer.train(
             agent=self.agent,
             trajectories=trajectories,  # Pass pre-collected trajectories
-            save_path=save_model_path
+            save_path=save_model_path,
+            save_each_epoch=save_each_epoch
         )
         
         return metrics

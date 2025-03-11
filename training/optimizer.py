@@ -106,7 +106,7 @@ class MyGRPOOptimizer:
         # Clip log probability differences to prevent extreme ratios
         # This helps with numerical stability
         log_ratio = logprobs - old_logprobs
-        log_ratio = torch.clamp(log_ratio, min=-1.0, max=1.0)
+        log_ratio = torch.clamp(log_ratio, min=-2.0, max=2.0)
         
         # Compute ratio between new and old policies
         ratio = torch.exp(log_ratio)
@@ -178,13 +178,15 @@ class MyGRPOOptimizer:
         
         return kl_penalty
         
-    def optimize(self, agent, trajectories):
+    def optimize(self, agent, trajectories, save_path=None, save_each_epoch=False):
         """
         Optimize the policy using GRPO
         
         Args:
             agent: TextWorldLLMAgent instance
             trajectories: List of trajectories
+            save_path: Path to save the model
+            save_each_epoch: If True, save model after each epoch
             
         Returns:
             Dictionary with training metrics
@@ -433,13 +435,20 @@ class MyGRPOOptimizer:
             print(f"Epoch {epoch+1}/{self.num_epochs} - Loss: {avg_loss:.4f}, PPO Loss: {avg_ppo_loss:.4f}, KL Penalty: {avg_kl_penalty:.4f}")
             print(f"  Ratios: mean={avg_ratio_mean:.4f}, min={avg_ratio_min:.4f}, max={avg_ratio_max:.4f}")
             print(f"  Advantages: mean={avg_advantage_mean:.4f}, min={avg_advantage_min:.4f}, max={avg_advantage_max:.4f}")
+            
+            # Save model after each epoch if requested
+            if save_each_epoch and save_path:
+                epoch_save_path = f"{save_path}_epoch_{epoch+1}.pt"
+                epoch_metrics = {k: metrics[k][:epoch+1] for k in metrics}  # Include metrics up to this epoch
+                self._save_model(agent, epoch_save_path, epoch_metrics)
+                print(f"Model saved after epoch {epoch+1} to {epoch_save_path}")
         
         # Set model back to evaluation mode
         agent.model.eval()
         
         return metrics
     
-    def train(self, agent, env=None, num_iterations=5, num_episodes_per_iteration=5, max_steps=10, save_path=None, trajectories=None):
+    def train(self, agent, env=None, num_iterations=5, num_episodes_per_iteration=5, max_steps=10, save_path=None, trajectories=None, save_each_epoch=False):
         """
         Train the agent using GRPO with pre-collected trajectories
         
@@ -451,6 +460,7 @@ class MyGRPOOptimizer:
             max_steps: Not used, kept for backward compatibility
             save_path: Path to save the trained model
             trajectories: Pre-collected trajectories
+            save_each_epoch: If True, save model after each epoch
             
         Returns:
             Dictionary with training metrics
@@ -473,7 +483,7 @@ class MyGRPOOptimizer:
         print(f"Average reward from pre-collected trajectories: {avg_reward:.4f}")
         
         # Optimize policy
-        metrics = self.optimize(agent, trajectories)
+        metrics = self.optimize(agent, trajectories, save_path=save_path, save_each_epoch=save_each_epoch)
         
         # Update metrics
         all_metrics["loss"].extend(metrics["loss"])
