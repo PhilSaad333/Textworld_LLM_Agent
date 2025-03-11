@@ -121,6 +121,13 @@ class MyGRPOOptimizer:
         # This implements the 1/G sum_a term in the GRPO objective
         ppo_loss = -ppo_values.mean()
         
+        if torch.isnan(ppo_loss).any() or torch.isinf(ppo_loss).any():
+            print(f"Warning: NaN or Inf in PPO loss!")
+            print(f"  logprobs: {logprobs}")
+            print(f"  old_logprobs: {old_logprobs}")
+            print(f"  advantages: {advantages}")
+            print(f"  ratios: {ratio}")
+        
         return ppo_loss
     
     def _compute_kl_penalty(self, logprobs, old_logprobs):
@@ -359,6 +366,16 @@ class MyGRPOOptimizer:
                         print(f"  Batch {batch_idx}/{len(batches)}: Loss={avg_batch_loss:.4f}, PPO={avg_batch_ppo_loss:.4f}, KL={avg_batch_kl_penalty:.4f}")
                         print(f"  Advantages: mean={adv_mean:.4f}, min={adv_min:.4f}, max={adv_max:.4f}")
                         print(f"  Ratios: mean={ratio_mean:.4f}, min={ratio_min:.4f}, max={ratio_max:.4f}")
+                
+                # Add this to your optimizer's training loop
+                if epoch == 0 and batch_idx == 0:
+                    print(f"Batch structure:")
+                    print(f"  Batch size: {len(batch)} prompts")
+                    for i, prompt_data in enumerate(batch[:2]):  # Check first 2 prompts
+                        print(f"  Prompt {i}:")
+                        print(f"    State: {prompt_data['state'][:50]}...")
+                        print(f"    Outputs: {len(prompt_data['outputs'])} completions")
+                        print(f"    Advantages: {len(prompt_data['advantages'])} values")
             
             # Compute average metrics for the epoch
             num_batches = len(batches)
@@ -573,3 +590,27 @@ class MyGRPOOptimizer:
             return torch.stack(token_log_probs).mean().unsqueeze(0)
         else:
             return torch.tensor([0.0], device=self.device)
+
+    def _convert_data_for_custom_grpo(self, data):
+        """
+        Convert data for custom GRPO training
+        
+        Args:
+            data: List of dictionaries containing state, outputs, and advantages
+            
+        Returns:
+            Converted data
+        """
+        converted_data = []
+        for i, example in enumerate(data[:3]):  # Check first 3 examples
+            print(f"Example {i}:")
+            print(f"  State: {example['state'][:50]}...")
+            print(f"  Outputs: {len(example['outputs'])} completions")
+            print(f"  Advantages: {len(example['advantages'])} values")
+            assert len(example['outputs']) == len(example['advantages']) == self.config.num_samples
+            converted_data.append({
+                "state": example['state'],
+                "outputs": example['outputs'],
+                "advantages": example['advantages']
+            })
+        return converted_data
