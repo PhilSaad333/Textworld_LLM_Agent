@@ -55,7 +55,7 @@ class TextWorldRLTrainer:
         self.env_manager = TaskEnvManager(self.task_config)
         
         self.model_name = main_config.model_config.model_name if hasattr(main_config, 'model_config') and hasattr(main_config.model_config, 'model_name') else "google/flan-t5-large"
-
+        
         # Initialize tokenizer first
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         
@@ -76,13 +76,13 @@ class TextWorldRLTrainer:
                 else:
                     # Load from checkpoint file
                     print(f"Loading model from checkpoint file: {model_path}")
-                    
-                    # Initialize the model with the base architecture
+                
+                # Initialize the model with the base architecture
                     self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
-                    
-                    # Resize model embeddings to match tokenizer with special tokens
-                    self.model.resize_token_embeddings(len(self.tokenizer))
-                    
+                
+                # Resize model embeddings to match tokenizer with special tokens
+                self.model.resize_token_embeddings(len(self.tokenizer))
+                
                     # Load the checkpoint
                     checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=True)
                     
@@ -123,20 +123,20 @@ class TextWorldRLTrainer:
             
             # Resize model embeddings to match tokenizer with special tokens
             self.model.resize_token_embeddings(len(self.tokenizer))
-            
-            # Explicitly move model to GPU if available
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            print(f"Using device: {self.device}")
-            self.model = self.model.to(self.device)
-            
-            # Create agent for evaluation
-            self.agent = TextWorldLLMAgent(self.main_config, training_mode=True, use_map=use_map)
-            
-            # Set the model and tokenizer directly instead of having the agent load them
-            self.agent.model = self.model
-            self.agent.tokenizer = self.tokenizer
-            self.agent.device = self.device  # Explicitly set the agent's device
-            self.agent.training_mode = False  # Set back to False for normal operation
+        
+        # Explicitly move model to GPU if available
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
+        self.model = self.model.to(self.device)
+        
+        # Create agent for evaluation
+        self.agent = TextWorldLLMAgent(self.main_config, training_mode=True, use_map=use_map)
+
+        # Set the model and tokenizer directly instead of having the agent load them
+        self.agent.model = self.model
+        self.agent.tokenizer = self.tokenizer
+        self.agent.device = self.device  # Explicitly set the agent's device
+        self.agent.training_mode = False  # Set back to False for normal operation
         
         # Initialize optimizer
         self.optimizer_type = getattr(self.config, 'optimizer_type', 'custom')  # 'custom' or 'huggingface'

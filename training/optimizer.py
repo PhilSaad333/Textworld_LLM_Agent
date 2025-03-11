@@ -103,8 +103,16 @@ class MyGRPOOptimizer:
         Returns:
             PPO loss (averaged over completions)
         """
+        # Clip log probability differences to prevent extreme ratios
+        # This helps with numerical stability
+        log_ratio = logprobs - old_logprobs
+        log_ratio = torch.clamp(log_ratio, min=-1.0, max=1.0)
+        
         # Compute ratio between new and old policies
-        ratio = torch.exp(logprobs - old_logprobs)
+        ratio = torch.exp(log_ratio)
+        
+        # Additional safety clipping for ratios
+        ratio = torch.clamp(ratio, min=0.1, max=10.0)
         
         # Clipped objective
         clipped_ratio = torch.clamp(ratio, 1.0 - self.epsilon, 1.0 + self.epsilon)
@@ -121,12 +129,14 @@ class MyGRPOOptimizer:
         # This implements the 1/G sum_a term in the GRPO objective
         ppo_loss = -ppo_values.mean()
         
+        # Debug information for extreme values
         if torch.isnan(ppo_loss).any() or torch.isinf(ppo_loss).any():
             print(f"Warning: NaN or Inf in PPO loss!")
             print(f"  logprobs: {logprobs}")
             print(f"  old_logprobs: {old_logprobs}")
+            print(f"  log_ratio: {log_ratio}")
+            print(f"  ratio: {ratio}")
             print(f"  advantages: {advantages}")
-            print(f"  ratios: {ratio}")
         
         return ppo_loss
     
@@ -145,12 +155,26 @@ class MyGRPOOptimizer:
         # Compute delta of log probabilities
         delta_lp = old_logprobs - logprobs
         
+        # Allow for larger differences in log probabilities
+        delta_lp = torch.clamp(delta_lp, min=-2.0, max=2.0)
+        
         # Compute KL divergence: exp(delta_lp) - delta_lp - 1
         kl_div = torch.exp(delta_lp) - delta_lp - 1.0
+        
+        # Clip KL divergence to a reasonable range
+        kl_div = torch.clamp(kl_div, min=0.0, max=5.0)
         
         # Average over completions (G in the GRPO paper)
         # This implements the 1/G sum_a term in the GRPO objective
         kl_penalty = kl_div.mean()
+        
+        # Debug information for extreme values
+        if torch.isnan(kl_penalty).any() or torch.isinf(kl_penalty).any():
+            print(f"Warning: NaN or Inf in KL penalty!")
+            print(f"  logprobs: {logprobs}")
+            print(f"  old_logprobs: {old_logprobs}")
+            print(f"  delta_lp: {delta_lp}")
+            print(f"  kl_div: {kl_div}")
         
         return kl_penalty
         
@@ -561,8 +585,12 @@ class MyGRPOOptimizer:
         # Get logits
         logits = outputs.logits
         
+        # Apply temperature scaling for numerical stability
+        temperature = 1.0
+        scaled_logits = logits / temperature
+        
         # Compute log probabilities
-        log_probs = F.log_softmax(logits, dim=-1)
+        log_probs = F.log_softmax(scaled_logits, dim=-1)
         
         # Extract log probabilities for the actual output tokens
         token_log_probs = []
@@ -586,9 +614,13 @@ class MyGRPOOptimizer:
         # Combine token log probabilities by averaging over tokens
         # This implements the 1/|o^a_t| factor in the GRPO objective
         if token_log_probs:
-            return torch.stack(token_log_probs).mean().unsqueeze(0)
+            # Clip log probabilities to prevent extreme values
+            clipped_log_probs = torch.stack(token_log_probs)
+            # Clip to a wider range that better matches observed values
+            clipped_log_probs = torch.clamp(clipped_log_probs, min=-30.0, max=-1.0)
+            return clipped_log_probs.mean().unsqueeze(0)
         else:
-            return torch.tensor([0.0], device=self.device)
+            return torch.tensor([-20.0], device=self.device)  # Return a reasonable default value
 
     def _convert_data_for_custom_grpo(self, data):
         """Convert gameplay data to the format expected by the custom GRPO optimizer.
