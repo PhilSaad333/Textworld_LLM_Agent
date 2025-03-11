@@ -63,67 +63,78 @@ class TextWorldRLTrainer:
         }
         self.tokenizer.add_special_tokens(special_tokens)
         
-        # Check if model_path is a .pt file or a directory
-        if model_path and model_path.endswith('.pt'):
-            # Load from .pt file
-            print(f"Loading model from PyTorch checkpoint: {model_path}")
+        if model_path:
+            print(f"Loading model from {model_path}")
             try:
-                # Try loading with weights_only=True to avoid security warnings
-                checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=True)
-                
-                # Initialize the model with the base architecture
-                self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-                
-                # Resize model embeddings to match tokenizer with special tokens
-                self.model.resize_token_embeddings(len(self.tokenizer))
-                
-                # Load the state dict directly
-                self.model.load_state_dict(checkpoint)
-                print("Successfully loaded model weights.")
-            except Exception as e:
-                print(f"Error loading checkpoint with weights_only=True: {e}")
-                print("Trying with default settings...")
-                
-                # Try loading with default settings as fallback
-                checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-                
-                # Initialize the model with the base architecture
-                self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
-                
-                # Resize model embeddings to match tokenizer with special tokens
-                self.model.resize_token_embeddings(len(self.tokenizer))
-                
-                # Check the structure of the checkpoint
-                if "model_state_dict" in checkpoint:
-                    # This is a training checkpoint with multiple components
-                    print("Detected training checkpoint format. Loading model_state_dict.")
-                    self.model.load_state_dict(checkpoint["model_state_dict"])
+                # Check if model_path is a directory or a file
+                if os.path.isdir(model_path):
+                    # Load from Hugging Face model directory
+                    print(f"Loading model from directory: {model_path}")
+                    self.model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
                 else:
-                    # This is just a model state dict
-                    print("Detected model state dict format.")
-                    self.model.load_state_dict(checkpoint)
+                    # Load from checkpoint file
+                    print(f"Loading model from checkpoint file: {model_path}")
+                    
+                    # Initialize the model with the base architecture
+                    self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+                    
+                    # Resize model embeddings to match tokenizer with special tokens
+                    self.model.resize_token_embeddings(len(self.tokenizer))
+                    
+                    # Load the checkpoint
+                    checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=True)
+                    
+                    # Check if it's a nested checkpoint
+                    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                        print("Detected training checkpoint format. Loading model_state_dict.")
+                        model_state_dict = checkpoint["model_state_dict"]
+                    else:
+                        print("Using checkpoint directly as model_state_dict")
+                        model_state_dict = checkpoint
+                    
+                    # Load the state dict
+                    self.model.load_state_dict(model_state_dict)
+                
+                # Explicitly move model to GPU if available
+                self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                print(f"Using device: {self.device}")
+                self.model = self.model.to(self.device)
+                
+                # Create agent for evaluation
+                self.agent = TextWorldLLMAgent(self.main_config, training_mode=True, use_map=use_map)
+                
+                # Set the model and tokenizer directly instead of having the agent load them
+                self.agent.model = self.model
+                self.agent.tokenizer = self.tokenizer
+                self.agent.device = self.device  # Explicitly set the agent's device
+                self.agent.training_mode = False  # Set back to False for normal operation
+                
+                print("Successfully loaded model.")
+                
+            except Exception as e:
+                print(f"Error loading model: {str(e)}")
+                raise
         else:
-            # Load from Hugging Face model directory or hub
-            print(f"Loading model from directory or hub: {model_path or 'google/flan-t5-base'}")
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                model_path if model_path else "google/flan-t5-base"
-            )
+            # Load default model
+            print("Loading default model: google/flan-t5-base")
+            self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+            
             # Resize model embeddings to match tokenizer with special tokens
             self.model.resize_token_embeddings(len(self.tokenizer))
-        
-        # Explicitly move model to GPU if available
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Using device: {self.device}")
-        self.model = self.model.to(self.device)
-        
-        # Create agent for evaluation
-        self.agent = TextWorldLLMAgent(self.main_config, training_mode=True, use_map=use_map)
-
-        # Set the model and tokenizer directly instead of having the agent load them
-        self.agent.model = self.model
-        self.agent.tokenizer = self.tokenizer
-        self.agent.device = self.device  # Explicitly set the agent's device
-        self.agent.training_mode = False  # Set back to False for normal operation
+            
+            # Explicitly move model to GPU if available
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            print(f"Using device: {self.device}")
+            self.model = self.model.to(self.device)
+            
+            # Create agent for evaluation
+            self.agent = TextWorldLLMAgent(self.main_config, training_mode=True, use_map=use_map)
+            
+            # Set the model and tokenizer directly instead of having the agent load them
+            self.agent.model = self.model
+            self.agent.tokenizer = self.tokenizer
+            self.agent.device = self.device  # Explicitly set the agent's device
+            self.agent.training_mode = False  # Set back to False for normal operation
         
         # Initialize optimizer
         self.optimizer_type = getattr(self.config, 'optimizer_type', 'custom')  # 'custom' or 'huggingface'

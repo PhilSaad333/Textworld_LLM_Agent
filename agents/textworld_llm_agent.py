@@ -59,17 +59,12 @@ class TextWorldLLMAgent:
         # Initialize model and tokenizer only if not in training mode
         if not training_mode:
             if model_path:
-                print(f"Loading fine-tuned model from {model_path}...")
+                print(f"Loading model from {model_path}...")
                 try:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     
-                    # Load the base model and tokenizer
-                    if self.is_autoregressive:
-                        self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
-                    else:
-                        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
-                    
+                    # Initialize tokenizer first
                     self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                     
                     # Add special tokens for command and room tags
@@ -83,20 +78,38 @@ class TextWorldLLMAgent:
                     
                     self.tokenizer.add_special_tokens(special_tokens)
                     
+                    # Initialize model
+                    if self.is_autoregressive:
+                        self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+                    else:
+                        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+                    
                     # Resize the model's token embeddings to account for the new tokens
                     self.model.resize_token_embeddings(len(self.tokenizer))
                     
-                    # Load the fine-tuned weights
-                    checkpoint = torch.load(model_path, map_location='cpu')
-                    self.model.load_state_dict(checkpoint['model_state_dict'])
+                    # Load the model weights
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+                    
+                    # Check if it's a nested checkpoint
+                    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                        print("Detected training checkpoint format. Loading model_state_dict.")
+                        model_state_dict = checkpoint["model_state_dict"]
+                    else:
+                        print("Using checkpoint directly as model_state_dict")
+                        model_state_dict = checkpoint
+                    
+                    # Load the state dict
+                    self.model.load_state_dict(model_state_dict)
                     
                     self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                     print(f"Using device: {self.device}")
                     self.model.to(self.device)
                     self.model.eval()  # Set to evaluation mode
                     
+                    print("Successfully loaded model weights.")
+                    
                 except Exception as e:
-                    raise RuntimeError(f"Failed to load fine-tuned model: {str(e)}")
+                    raise RuntimeError(f"Failed to load model: {str(e)}")
             else:
                 print(f"Loading base model and tokenizer: {self.model_name}...")
                 try:
@@ -328,13 +341,11 @@ Generate a *concise* response in the following format:
 
 A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve. 
 
-B) State your chosen action - Make sure it is in the available actions list:
+B) State your chosen action - Make sure it is in the list of Available actions:
 Therefore, I choose: <command>[exact action]</command>
 
 C) State your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
 I predict that I will be in room: <room>[room name]</room>
-
-IMPORTANT: You MUST use the <command>, </command>, <room>, and </room> tags exactly as shown above, and your chosen action must be one of the available actions.
 
 Your response:"""
 
@@ -419,7 +430,6 @@ Your response:"""
                         best_idx = random.randint(0, len(completions)-1)
                         full_response = completions[best_idx]
                         format_check = self.check_format(full_response)
-                        print(f"Randomly selected completion {best_idx+1}")
                     
                     else:  # Default to "best_beam"
                         # Use the first completion (top beam)
