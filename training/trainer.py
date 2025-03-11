@@ -78,24 +78,24 @@ class TextWorldRLTrainer:
                     print(f"Loading model from checkpoint file: {model_path}")
                 
                 # Initialize the model with the base architecture
-                    self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
                 
                 # Resize model embeddings to match tokenizer with special tokens
                 self.model.resize_token_embeddings(len(self.tokenizer))
                 
-                    # Load the checkpoint
-                    checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=True)
-                    
-                    # Check if it's a nested checkpoint
-                    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-                        print("Detected training checkpoint format. Loading model_state_dict.")
-                        model_state_dict = checkpoint["model_state_dict"]
-                    else:
-                        print("Using checkpoint directly as model_state_dict")
-                        model_state_dict = checkpoint
-                    
-                    # Load the state dict
-                    self.model.load_state_dict(model_state_dict)
+                # Load the checkpoint
+                checkpoint = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=True)
+                
+                # Check if it's a nested checkpoint
+                if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                    print("Detected training checkpoint format. Loading model_state_dict.")
+                    model_state_dict = checkpoint["model_state_dict"]
+                else:
+                    print("Using checkpoint directly as model_state_dict")
+                    model_state_dict = checkpoint
+                
+                # Load the state dict
+                self.model.load_state_dict(model_state_dict)
                 
                 # Explicitly move model to GPU if available
                 self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

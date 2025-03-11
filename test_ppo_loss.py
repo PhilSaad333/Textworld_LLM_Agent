@@ -8,10 +8,9 @@ from tqdm import tqdm
 import random
 import os
 import sys
+import copy
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-# Add the project root to the path so we can import our modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.textworld_llm_agent import TextWorldLLMAgent
 from training.optimizer import MyGRPOOptimizer
@@ -19,14 +18,14 @@ from training.optimizer import MyGRPOOptimizer
 @dataclass
 class DummyConfig:
     num_samples: int = 6  # G in the paper
-    learning_rate: float = 1e-6
+    learning_rate: float = 1e-8
     batch_size: int = 3
     max_input_length: int = 512
     max_completion_length: int = 128
     beta: float = 0.1  # KL penalty coefficient
     epsilon: float = 0.05  # PPO clipping parameter
     max_grad_norm: float = 0.5  # Gradient clipping
-    model_name: str = "google/flan-t5-base"
+    model_name: str = "google/flan-t5-large"  # Updated to large model
 
 def load_gameplay_data(file_path: str) -> Dict[str, Any]:
     """Load gameplay data from JSON file"""
@@ -119,6 +118,78 @@ def debug_logprobs(model, tokenizer, device, prompt, completion):
         print("No valid tokens found!")
         return 0.0
 
+def compute_logprobs_with_grad(model, tokenizer, device, prompt, completion):
+    """Compute log probabilities with gradient tracking"""
+    # Tokenize input
+    inputs = tokenizer(
+        prompt,
+        padding="max_length",
+        truncation=True,
+        max_length=512,
+        return_tensors="pt"
+    ).to(device)
+    
+    # Tokenize output
+    output_tokens = tokenizer(
+        completion,
+        padding="max_length",
+        truncation=True,
+        max_length=128,
+        return_tensors="pt"
+    ).to(device)
+    
+    # Get input for this example
+    input_ids = inputs.input_ids[0:1]
+    attention_mask = inputs.attention_mask[0:1] if hasattr(inputs, 'attention_mask') else None
+    
+    # Get output for this example
+    output_ids = output_tokens.input_ids[0]
+    
+    # Prepare model inputs
+    model_inputs = {
+        "input_ids": input_ids,
+    }
+    if attention_mask is not None:
+        model_inputs["attention_mask"] = attention_mask
+    
+    # For encoder-decoder models, we need to provide decoder inputs
+    decoder_start_token_id = getattr(model.config, "decoder_start_token_id", None)
+    if decoder_start_token_id is None:
+        decoder_start_token_id = getattr(model.config, "pad_token_id", 0)
+    
+    # Create decoder_input_ids by shifting output_ids right and prepending decoder_start_token_id
+    decoder_input_ids = torch.cat([
+        torch.tensor([[decoder_start_token_id]], device=device),
+        output_ids[:-1].unsqueeze(0)
+    ], dim=1)
+    
+    model_inputs["decoder_input_ids"] = decoder_input_ids
+    
+    # Forward pass through the model (with gradients)
+    outputs = model(**model_inputs)
+    
+    # Get logits
+    logits = outputs.logits
+    
+    # Compute log probabilities
+    log_probs = F.log_softmax(logits, dim=-1)
+    
+    # Extract log probabilities for the actual output tokens
+    token_log_probs = []
+    
+    # For encoder-decoder models, we compare each position in the output with the next token
+    for i in range(len(output_ids) - 1):  # -1 because we don't need the last token's prediction
+        if output_ids[i+1] == model.config.pad_token_id:
+            continue  # Skip pad tokens
+        token_log_prob = log_probs[0, i, output_ids[i+1]]
+        token_log_probs.append(token_log_prob)
+    
+    # Combine token log probabilities by averaging over tokens
+    if token_log_probs:
+        return torch.stack(token_log_probs).mean()
+    else:
+        return torch.tensor(-20.0, device=device, requires_grad=True)
+
 def debug_ppo_loss(old_logprobs, new_logprobs, advantages, epsilon=0.05):
     """Debug PPO loss calculation"""
     print("\n=== Debug PPO Loss ===")
@@ -188,10 +259,20 @@ def debug_kl_penalty(old_logprobs, new_logprobs):
     
     return kl_penalty.item()
 
-def debug_batch_processing(model, tokenizer, device, batch, epsilon=0.05, beta=0.1):
-    """Debug batch processing"""
-    print("\n=== Debug Batch Processing ===")
+def debug_batch_processing_with_updates(model, tokenizer, device, batch, epsilon=0.05, beta=0.1, learning_rate=1e-8):
+    """Debug batch processing with actual gradient updates"""
+    print("\n=== Debug Batch Processing with Actual Updates ===")
     print(f"Batch size: {len(batch)} prompts")
+    
+    # Create a copy of the model for computing old log probs
+    old_model = copy.deepcopy(model)
+    old_model.eval()
+    
+    # Set model to training mode
+    model.train()
+    
+    # Create optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     
     batch_loss = 0.0
     batch_ppo_loss = 0.0
@@ -209,46 +290,87 @@ def debug_batch_processing(model, tokenizer, device, batch, epsilon=0.05, beta=0
         print(f"Number of completions: {len(outputs)}")
         print(f"Number of advantages: {len(advantages)}")
         
-        # Compute old log probabilities
+        # Compute old log probabilities using the old model
         old_logprobs_list = []
         for i, output in enumerate(outputs):
             print(f"\nCompletion {i}:")
-            old_logprob = debug_logprobs(model, tokenizer, device, state, output)
+            old_logprob = debug_logprobs(old_model, tokenizer, device, state, output)
             old_logprobs_list.append(old_logprob)
         
-        # Simulate computing new log probabilities (slightly different)
-        # In a real scenario, these would be computed after model updates
+        # Convert to tensor
+        old_logprobs = torch.tensor(old_logprobs_list, device=device)
+        advantages_tensor = torch.tensor(advantages, device=device)
+        
+        # Compute new log probabilities with gradients using the current model
+        optimizer.zero_grad()
         new_logprobs_list = []
-        for i, old_logprob in enumerate(old_logprobs_list):
-            # Simulate a small change in log probabilities
-            # This is just for testing - in reality, these would come from the updated model
-            noise = np.random.normal(0, 0.1)  # Small random noise
-            new_logprob = old_logprob + noise
+        for i, output in enumerate(outputs):
+            new_logprob = compute_logprobs_with_grad(model, tokenizer, device, state, output)
             new_logprobs_list.append(new_logprob)
-            print(f"Completion {i}: Old logprob={old_logprob:.4f}, New logprob={new_logprob:.4f}, Ratio={np.exp(new_logprob-old_logprob):.4f}")
+            print(f"Completion {i}: Old logprob={old_logprobs_list[i]:.4f}, New logprob={new_logprob.item():.4f}, Ratio={torch.exp(new_logprob-old_logprobs_list[i]).item():.4f}")
         
-        # Convert to tensors
-        old_logprobs = torch.tensor(old_logprobs_list)
-        new_logprobs = torch.tensor(new_logprobs_list)
-        advantages_tensor = torch.tensor(advantages)
+        # Stack new log probs
+        new_logprobs = torch.stack(new_logprobs_list)
         
-        # Compute ratios
-        ratios = torch.exp(new_logprobs - old_logprobs)
-        batch_ratios.extend(ratios.numpy().tolist())
+        # Add safety clipping for log probabilities
+        new_logprobs = torch.clamp(new_logprobs, min=-20.0, max=0.0)
         
-        # Debug PPO loss
-        prompt_ppo_loss = debug_ppo_loss(old_logprobs, new_logprobs, advantages_tensor, epsilon)
+        # Compute ratios with additional safety measures
+        log_ratio = new_logprobs - old_logprobs
+        log_ratio = torch.clamp(log_ratio, min=-1.0, max=1.0)  # Clip log ratios
+        ratios = torch.exp(log_ratio)
         
-        # Debug KL penalty
-        prompt_kl_penalty = debug_kl_penalty(old_logprobs, new_logprobs)
+        # Additional ratio clipping for extra safety
+        ratios = torch.clamp(ratios, min=0.1, max=10.0)
+        
+        batch_ratios.extend(ratios.detach().cpu().numpy().tolist())
+        
+        # Debug PPO loss with clipped ratios
+        ppo_loss = -torch.min(
+            ratios * advantages_tensor,
+            torch.clamp(ratios, 1.0 - epsilon, 1.0 + epsilon) * advantages_tensor
+        ).mean()
+        
+        # Modify KL penalty calculation to use log ratios directly
+        kl_penalty = (torch.exp(log_ratio) - log_ratio - 1.0).mean()
+        
+        # Scale down the KL penalty coefficient if it's too large
+        if kl_penalty.item() > 100:
+            beta = beta * (100 / kl_penalty.item())
         
         # Compute total loss
-        prompt_loss = prompt_ppo_loss + beta * prompt_kl_penalty
+        loss = ppo_loss + beta * kl_penalty
+        
+        # Print loss components and ratios
+        print(f"\nLoss components:")
+        print(f"PPO loss: {ppo_loss.item():.4f}")
+        print(f"KL penalty: {kl_penalty.item():.4f}")
+        print(f"Total loss: {loss.item():.4f}")
+        print(f"Max ratio: {ratios.max().item():.4f}")
+        print(f"Min ratio: {ratios.min().item():.4f}")
+        
+        # Backward pass
+        loss.backward()
+        
+        # Clip gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+        
+        # Update model
+        optimizer.step()
         
         # Accumulate losses
-        batch_loss += prompt_loss
-        batch_ppo_loss += prompt_ppo_loss
-        batch_kl_penalty += prompt_kl_penalty
+        batch_loss += loss.item()
+        batch_ppo_loss += ppo_loss.item()
+        batch_kl_penalty += kl_penalty.item()
+        
+        # Compute ratios after update
+        print("\n=== After Update ===")
+        after_update_logprobs_list = []
+        for i, output in enumerate(outputs):
+            after_logprob = debug_logprobs(model, tokenizer, device, state, output)
+            after_update_logprobs_list.append(after_logprob)
+            ratio_after = np.exp(after_logprob - old_logprobs_list[i])
+            print(f"Completion {i}: Old logprob={old_logprobs_list[i]:.4f}, After update logprob={after_logprob:.4f}, Ratio={ratio_after:.4f}")
     
     # Compute batch statistics
     avg_batch_loss = batch_loss / len(batch)
@@ -274,20 +396,40 @@ def main():
     # Load configuration
     config = DummyConfig()
     
-    # Load model and tokenizer
-    print(f"Loading model: {config.model_name}")
-    model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name).to(device)
+    # Initialize tokenizer
+    print(f"Loading tokenizer: {config.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     
-    # Add special tokens for TextWorld - using the correct tokens from the agent
+    # Add special tokens
     special_tokens = {
         'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
     }
     tokenizer.add_special_tokens(special_tokens)
+    
+    # Initialize the base model
+    print(f"Loading base model: {config.model_name}")
+    model = AutoModelForSeq2SeqLM.from_pretrained(config.model_name)
     model.resize_token_embeddings(len(tokenizer))
     
-    # Set model to evaluation mode for consistent results
-    model.eval()
+    # Load the fine-tuned weights
+    fine_tuned_model_path = '/content/drive/MyDrive/textworld_rl_models/flan_t5_large_finetuned/model_state_dict.pt'
+    print(f"Loading fine-tuned weights from: {fine_tuned_model_path}")
+    
+    checkpoint = torch.load(fine_tuned_model_path, map_location='cpu')
+    
+    # Check if it's a nested checkpoint
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        print("Loading model_state_dict from training checkpoint")
+        model_state_dict = checkpoint["model_state_dict"]
+    else:
+        print("Using checkpoint directly as model_state_dict")
+        model_state_dict = checkpoint
+    
+    # Load the state dict
+    model.load_state_dict(model_state_dict)
+    
+    # Move model to device
+    model.to(device)
     
     # Use the specific gameplay data path
     gameplay_data_path = '/content/drive/MyDrive/textworld_rl_data/gameplay_data_1_filtered_fixed.json'
@@ -384,9 +526,10 @@ def main():
     batch_size = min(2, len(structured_data))
     test_batch = structured_data[:batch_size]
     
-    # Debug batch processing
-    debug_batch_processing(model, tokenizer, device, test_batch, 
-                          epsilon=config.epsilon, beta=config.beta)
+    # Debug batch processing with actual updates
+    debug_batch_processing_with_updates(model, tokenizer, device, test_batch, 
+                                       epsilon=config.epsilon, beta=config.beta, 
+                                       learning_rate=config.learning_rate)
     
     print("\nTest completed!")
 

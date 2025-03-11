@@ -399,6 +399,13 @@ class MyGRPOOptimizer:
                         print(f"  Prompt {i}:")
                         print(f"    Outputs: {len(prompt_data['outputs'])} completions")
                         print(f"    Advantages: {len(prompt_data['advantages'])} values")
+                
+                # Before processing each batch:
+                print("\nBatch log probability details:")
+                print(f"Old logprobs: {old_logprobs}")
+                print(f"New logprobs: {new_logprobs}")
+                print(f"Log ratio: {new_logprobs - old_logprobs}")
+                print(f"Ratio: {torch.exp(new_logprobs - old_logprobs)}")
             
             # Compute average metrics for the epoch
             num_batches = len(batches)
