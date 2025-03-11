@@ -857,14 +857,21 @@ class TextWorldRLTrainer:
         completions = data_dict["completion"]
         rewards = data_dict["reward"]
         
-        # Determine G (num_samples) by finding consecutive identical prompts
-        G = 1
-        while G < len(prompts) and prompts[G] == prompts[0]:
-            G += 1
-        print(f"Detected {G} completions per step")
+        # Get G from config
+        G = self.config.num_generations if hasattr(self.config, 'num_generations') else \
+            self.config.num_samples if hasattr(self.config, 'num_samples') else 6
+        print(f"Using {G} completions per step from config")
         
         # Calculate number of steps
         total_examples = len(prompts)
+        if total_examples % G != 0:
+            print(f"Warning: Total examples ({total_examples}) is not divisible by G ({G})")
+            # Truncate to nearest multiple of G
+            total_examples = (total_examples // G) * G
+            prompts = prompts[:total_examples]
+            completions = completions[:total_examples]
+            rewards = rewards[:total_examples]
+        
         num_steps = total_examples // G
         print(f"Total examples: {total_examples}")
         print(f"Number of steps: {num_steps}")
@@ -884,13 +891,22 @@ class TextWorldRLTrainer:
             prompt = prompts[start_idx]
             
             # Verify all prompts in this group are the same
-            if not all(prompts[i] == prompt for i in range(start_idx, end_idx)):
-                print(f"Warning: Not all prompts in step {step_idx} are the same. Skipping...")
+            group_prompts = prompts[start_idx:end_idx]
+            if not all(p == prompt for p in group_prompts):
+                print(f"Warning: Not all prompts in step {step_idx} are the same. This indicates a data alignment issue.")
+                print("First prompt:", prompt[:100], "...")
+                different_prompts = [(i, p[:100]) for i, p in enumerate(group_prompts) if p != prompt]
+                print(f"Different prompts found at indices: {different_prompts}")
                 continue
             
             # Get all G completions and rewards for this step
             step_completions = completions[start_idx:end_idx]
             step_rewards = rewards[start_idx:end_idx]
+            
+            # Verify we have exactly G completions and rewards
+            if len(step_completions) != G or len(step_rewards) != G:
+                print(f"Warning: Step {step_idx} has incorrect number of completions/rewards. Expected {G}, got {len(step_completions)}/{len(step_rewards)}")
+                continue
             
             # Create step data with all G completions
             step_data = {
@@ -906,6 +922,8 @@ class TextWorldRLTrainer:
         # Only add trajectory if it has steps
         if len(trajectory['steps']) > 0:
             trajectories.append(trajectory)
+        else:
+            print("Warning: No valid steps found after filtering!")
         
         print(f"\nConverted data structure:")
         print(f"Number of trajectories: {len(trajectories)}")
@@ -917,5 +935,13 @@ class TextWorldRLTrainer:
                 print(f"Number of completions: {len(first_step['outputs'])}")
                 print(f"Number of rewards: {len(first_step['rewards'])}")
                 print(f"First completion: {first_step['outputs'][0][:100]}...")
+                print(f"Rewards: {first_step['rewards']}")
+                
+                # Additional verification of first step
+                print("\nVerifying first step structure:")
+                print(f"All prompts identical: {all(p == first_step['state'] for p in first_step['states'])}")
+                print(f"Number of states: {len(first_step['states'])}")
+                print(f"Number of outputs: {len(first_step['outputs'])}")
+                print(f"Number of rewards: {len(first_step['rewards'])}")
         
         return trajectories
