@@ -54,8 +54,10 @@ class TextWorldRLTrainer:
         )
         self.env_manager = TaskEnvManager(self.task_config)
         
+        self.model_name = main_config.model_config.model_name if hasattr(main_config, 'model_config') and hasattr(main_config.model_config, 'model_name') else "google/flan-t5-large"
+
         # Initialize tokenizer first
-        self.tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         
         # Add special tokens to tokenizer before loading the model
         special_tokens = {
@@ -76,7 +78,7 @@ class TextWorldRLTrainer:
                     print(f"Loading model from checkpoint file: {model_path}")
                     
                     # Initialize the model with the base architecture
-                    self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+                    self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
                     
                     # Resize model embeddings to match tokenizer with special tokens
                     self.model.resize_token_embeddings(len(self.tokenizer))
@@ -116,8 +118,8 @@ class TextWorldRLTrainer:
                 raise
         else:
             # Load default model
-            print("Loading default model: google/flan-t5-base")
-            self.model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
+            print(f"Loading default model: {self.model_name}")
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
             
             # Resize model embeddings to match tokenizer with special tokens
             self.model.resize_token_embeddings(len(self.tokenizer))
