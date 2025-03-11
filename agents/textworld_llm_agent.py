@@ -320,21 +320,21 @@ Goal: {self.goal if self.goal else "Unknown"}
 Location: {room}
 Observation: {clean_obs}
 Inventory: {inventory_str}{map_str}
-Previous actions:
+Your recent actions:
 {history_str}
-Currently available actions: {filtered_actions}
+Available actions: {filtered_actions}
 
 Generate a *concise* response in the following format:
 
 A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve. 
 
-B) Then, state your chosen action - Make sure it is in the available actions list:
+B) State your chosen action - Make sure it is in the available actions list:
 Therefore, I choose: <command>[exact action]</command>
 
-C) Then, state your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
+C) State your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
 I predict that I will be in room: <room>[room name]</room>
 
-IMPORTANT: You MUST use the <command>, <\command>, <room>, and <\room> tags exactly as shown above.
+IMPORTANT: You MUST use the <command>, </command>, <room>, and </room> tags exactly as shown above, and your chosen action must be one of the available actions.
 
 Your response:"""
 
