@@ -25,7 +25,7 @@ class MyGRPOOptimizer:
         self.beta = config.beta if hasattr(config, 'beta') else 0.01  # KL penalty coefficient
         self.learning_rate = config.learning_rate if hasattr(config, 'learning_rate') else 5e-5
         self.num_epochs = config.num_epochs if hasattr(config, 'num_epochs') else 3
-        self.batch_size = config.batch_size if hasattr(config, 'batch_size') else 8
+        self.batch_size = config.batch_size if hasattr(config, 'batch_size') else 2  # Smaller batch size since each example is larger
         self.max_grad_norm = config.max_grad_norm if hasattr(config, 'max_grad_norm') else 1.0
         
         # Reward function parameters
@@ -369,11 +369,10 @@ class MyGRPOOptimizer:
                 
                 # Add this to your optimizer's training loop
                 if epoch == 0 and batch_idx == 0:
-                    print(f"Batch structure:")
+                    print(f"Batch structure in optimizer:")
                     print(f"  Batch size: {len(batch)} prompts")
-                    for i, prompt_data in enumerate(batch[:2]):  # Check first 2 prompts
+                    for i, prompt_data in enumerate(batch[:2]):
                         print(f"  Prompt {i}:")
-                        print(f"    State: {prompt_data['state'][:50]}...")
                         print(f"    Outputs: {len(prompt_data['outputs'])} completions")
                         print(f"    Advantages: {len(prompt_data['advantages'])} values")
             
@@ -592,25 +591,79 @@ class MyGRPOOptimizer:
             return torch.tensor([0.0], device=self.device)
 
     def _convert_data_for_custom_grpo(self, data):
-        """
-        Convert data for custom GRPO training
-        
-        Args:
-            data: List of dictionaries containing state, outputs, and advantages
-            
-        Returns:
-            Converted data
-        """
+        """Convert gameplay data to the format expected by the custom GRPO optimizer."""
         converted_data = []
-        for i, example in enumerate(data[:3]):  # Check first 3 examples
-            print(f"Example {i}:")
-            print(f"  State: {example['state'][:50]}...")
-            print(f"  Outputs: {len(example['outputs'])} completions")
-            print(f"  Advantages: {len(example['advantages'])} values")
-            assert len(example['outputs']) == len(example['advantages']) == self.config.num_samples
-            converted_data.append({
-                "state": example['state'],
-                "outputs": example['outputs'],
-                "advantages": example['advantages']
-            })
+        
+        # Check if data is in the expected format
+        if isinstance(data, dict) and 'data' in data:
+            data_content = data['data']
+            
+            if 'prompt' in data_content and 'completion' in data_content and 'reward' in data_content:
+                prompts = data_content['prompt']
+                completions = data_content['completion']
+                rewards = data_content['reward']
+                
+                # Group by prompt and track original indices to maintain order
+                prompt_groups = {}
+                
+                for i in range(len(prompts)):
+                    prompt = prompts[i]
+                    completion = completions[i]
+                    reward = rewards[i]
+                    
+                    # Create a unique key for each prompt to handle duplicates
+                    # You might need to adjust this based on your data
+                    prompt_key = f"{prompt}_{i // self.config.num_samples}"
+                    
+                    if prompt_key not in prompt_groups:
+                        prompt_groups[prompt_key] = {
+                            "prompt": prompt,
+                            "completions": [],
+                            "rewards": [],
+                            "original_indices": []
+                        }
+                    
+                    prompt_groups[prompt_key]["completions"].append(completion)
+                    prompt_groups[prompt_key]["rewards"].append(reward)
+                    prompt_groups[prompt_key]["original_indices"].append(i)
+                
+                # Process each group
+                for prompt_key, group in prompt_groups.items():
+                    # Check if we have enough completions
+                    if len(group["completions"]) >= self.config.num_samples:
+                        # Take the first G completions
+                        completions = group["completions"][:self.config.num_samples]
+                        rewards = group["rewards"][:self.config.num_samples]
+                        
+                        # Convert rewards to advantages
+                        advantages = self._compute_advantages_from_rewards(rewards)
+                        
+                        # Add example
+                        converted_data.append({
+                            "state": group["prompt"],
+                            "outputs": completions,
+                            "advantages": advantages,
+                            "old_logprobs": None  # Will be computed during training
+                        })
+                
+                # Print debug information
+                print(f"Converted {len(converted_data)} examples")
+                if converted_data:
+                    print(f"First example has {len(converted_data[0]['outputs'])} completions")
+                    print(f"First example has {len(converted_data[0]['advantages'])} advantages")
+                    
+                    # Verify all examples have G completions
+                    completion_counts = [len(ex["outputs"]) for ex in converted_data]
+                    if min(completion_counts) != max(completion_counts):
+                        print(f"Warning: Not all examples have the same number of completions!")
+                        print(f"Min: {min(completion_counts)}, Max: {max(completion_counts)}")
+        
         return converted_data
+
+    def _compute_advantages_from_rewards(self, rewards):
+        """Convert rewards to advantages by normalizing"""
+        rewards = np.array(rewards)
+        advantages = rewards - np.mean(rewards)
+        if np.std(advantages) > 0:
+            advantages = advantages / np.std(advantages)
+        return advantages.tolist()
