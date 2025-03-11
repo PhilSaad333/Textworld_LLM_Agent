@@ -334,6 +334,8 @@ Therefore, I choose: <command>[exact action]</command>
 C) Then, state your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
 I predict that I will be in room: <room>[room name]</room>
 
+IMPORTANT: You MUST use the <command>, <\command>, <room>, and <\room> tags exactly as shown above.
+
 Your response:"""
 
         # For autoregressive models, add a newline to help the model understand where to start generating
@@ -390,11 +392,43 @@ Your response:"""
                     for i, completion in enumerate(completions):
                         print(f"Completion {i+1}:\n{completion}\n")
                 
-                # Process the first completion (or select based on eval_config)
-                full_response = completions[0]
-                
-                # Check format using the check_format function
-                format_check = self.check_format(full_response)
+                # Process the completions based on action_selection strategy
+                if has_eval_config and len(completions) > 1:
+                    action_selection = self.config.eval_config.action_selection
+                    
+                    if action_selection == "best_format":
+                        # Check all completions and select the first one with correct format
+                        format_checks = [self.check_format(comp) for comp in completions]
+                        valid_indices = [i for i, check in enumerate(format_checks) 
+                                        if check["has_command_tags"] and check["has_room_tags"]]
+                        
+                        if valid_indices:
+                            # Use the first completion with valid format
+                            best_idx = valid_indices[0]
+                            full_response = completions[best_idx]
+                            format_check = format_checks[best_idx]
+                            print(f"Selected completion {best_idx+1} based on format")
+                        else:
+                            # Fall back to first completion if none have valid format
+                            full_response = completions[0]
+                            format_check = self.check_format(full_response)
+                    
+                    elif action_selection == "sample":
+                        # Randomly select a completion
+                        import random
+                        best_idx = random.randint(0, len(completions)-1)
+                        full_response = completions[best_idx]
+                        format_check = self.check_format(full_response)
+                        print(f"Randomly selected completion {best_idx+1}")
+                    
+                    else:  # Default to "best_beam"
+                        # Use the first completion (top beam)
+                        full_response = completions[0]
+                        format_check = self.check_format(full_response)
+                else:
+                    # Default to first completion
+                    full_response = completions[0]
+                    format_check = self.check_format(full_response)
                 
                 # Print format check if requested in eval_config
                 if has_eval_config and self.config.eval_config.print_format_check:

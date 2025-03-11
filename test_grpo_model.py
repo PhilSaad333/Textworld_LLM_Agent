@@ -41,8 +41,8 @@ def main():
         num_beams=6,
         num_return_sequences=6,
         do_sample=True,
-        temperature=0.7,
-        top_p=0.9,
+        temperature=0.8,  # Slightly higher temperature for more diversity
+        top_p=0.95,       # Higher top_p for more diversity
         
         # Evaluation behavior
         print_completions=True,
@@ -50,7 +50,7 @@ def main():
         print_action_selection=True,
         
         # Action selection strategy
-        action_selection="best_beam",
+        action_selection="best_format",  # Changed to prioritize completions with correct format
         
         # Logging
         log_to_file=True,
@@ -84,7 +84,7 @@ def main():
         eval_config=eval_config
     )
     
-    # Define difficulties to test
+    # Try different difficulties
     difficulties = [1, 5, 10, 15]
     
     # Play games at each difficulty
@@ -95,17 +95,28 @@ def main():
         print(f"Testing difficulty level {difficulty}")
         print(f"{'='*50}\n")
         
-        # Play a game at this difficulty
-        game_record = game_runner.play_game(difficulty=difficulty, log=True)
-        
-        # Store results
-        results[difficulty] = {
-            "success": game_record["success"],
-            "steps": len(game_record["actions"]),
-            "score": game_record["score"],
-            "format_check_passed": sum(1 for step in game_record["steps"] if step.get("format_check_passed", False)),
-            "total_steps": len(game_record["steps"])
-        }
+        try:
+            # Play a game at this difficulty
+            game_record = game_runner.play_game(difficulty=difficulty, log=True)
+            
+            # Store results
+            results[difficulty] = {
+                "success": game_record["metrics"]["success"],
+                "steps": game_record["metrics"]["steps"],
+                "score": game_record["metrics"]["score"],
+                "format_check_passed": sum(1 for step in game_record["trajectory"] if step.get("format_check_passed", False)),
+                "total_steps": len(game_record["trajectory"])
+            }
+        except Exception as e:
+            print(f"Error playing game at difficulty {difficulty}: {str(e)}")
+            results[difficulty] = {
+                "success": False,
+                "steps": 0,
+                "score": 0,
+                "format_check_passed": 0,
+                "total_steps": 0,
+                "error": str(e)
+            }
     
     # Print summary
     print("\n\n" + "="*50)
