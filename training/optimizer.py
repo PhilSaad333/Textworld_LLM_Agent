@@ -591,7 +591,28 @@ class MyGRPOOptimizer:
             return torch.tensor([0.0], device=self.device)
 
     def _convert_data_for_custom_grpo(self, data):
-        """Convert gameplay data to the format expected by the custom GRPO optimizer."""
+        """Convert gameplay data to the format expected by the custom GRPO optimizer.
+        
+        Expected input format:
+        {
+            'data': {
+                'prompt': [prompt1, prompt2, ...],
+                'completion': [completion1, completion2, ...],
+                'reward': [reward1, reward2, ...],
+            }
+        }
+        
+        Expected output format:
+        [
+            {
+                "state": prompt1,
+                "outputs": [completion1_1, completion1_2, ..., completion1_G],
+                "advantages": [advantage1_1, advantage1_2, ..., advantage1_G],
+                "old_logprobs": None  # Will be computed during training
+            },
+            ...
+        ]
+        """
         converted_data = []
         
         # Check if data is in the expected format
@@ -603,60 +624,59 @@ class MyGRPOOptimizer:
                 completions = data_content['completion']
                 rewards = data_content['reward']
                 
-                # Group by prompt and track original indices to maintain order
-                prompt_groups = {}
+                # Group by prompt indices
+                num_total = len(prompts)
+                num_groups = num_total // self.num_samples
                 
-                for i in range(len(prompts)):
-                    prompt = prompts[i]
-                    completion = completions[i]
-                    reward = rewards[i]
-                    
-                    # Create a unique key for each prompt to handle duplicates
-                    # You might need to adjust this based on your data
-                    prompt_key = f"{prompt}_{i // self.config.num_samples}"
-                    
-                    if prompt_key not in prompt_groups:
-                        prompt_groups[prompt_key] = {
-                            "prompt": prompt,
-                            "completions": [],
-                            "rewards": [],
-                            "original_indices": []
-                        }
-                    
-                    prompt_groups[prompt_key]["completions"].append(completion)
-                    prompt_groups[prompt_key]["rewards"].append(reward)
-                    prompt_groups[prompt_key]["original_indices"].append(i)
+                print(f"\nGrouping data:")
+                print(f"Total examples: {num_total}")
+                print(f"Group size (G): {self.num_samples}")
+                print(f"Number of complete groups: {num_groups}")
                 
-                # Process each group
-                for prompt_key, group in prompt_groups.items():
-                    # Check if we have enough completions
-                    if len(group["completions"]) >= self.config.num_samples:
-                        # Take the first G completions
-                        completions = group["completions"][:self.config.num_samples]
-                        rewards = group["rewards"][:self.config.num_samples]
-                        
-                        # Convert rewards to advantages
-                        advantages = self._compute_advantages_from_rewards(rewards)
-                        
-                        # Add example
-                        converted_data.append({
-                            "state": group["prompt"],
-                            "outputs": completions,
-                            "advantages": advantages,
-                            "old_logprobs": None  # Will be computed during training
-                        })
+                # Process each complete group
+                for group_idx in range(num_groups):
+                    start_idx = group_idx * self.num_samples
+                    end_idx = start_idx + self.num_samples
+                    
+                    # Get the prompt (should be the same for all completions in group)
+                    prompt = prompts[start_idx]
+                    
+                    # Verify all prompts in the group are the same
+                    if not all(prompts[i] == prompt for i in range(start_idx, end_idx)):
+                        print(f"Warning: Not all prompts in group {group_idx} are the same!")
+                        continue
+                    
+                    # Get completions and rewards for this group
+                    group_completions = completions[start_idx:end_idx]
+                    group_rewards = rewards[start_idx:end_idx]
+                    
+                    # Convert rewards to advantages
+                    advantages = self._compute_advantages_from_rewards(group_rewards)
+                    
+                    # Add example
+                    converted_data.append({
+                        "state": prompt,
+                        "outputs": group_completions,
+                        "advantages": advantages,
+                        "old_logprobs": None  # Will be computed during training
+                    })
                 
                 # Print debug information
-                print(f"Converted {len(converted_data)} examples")
+                print(f"\nConverted {len(converted_data)} examples")
                 if converted_data:
-                    print(f"First example has {len(converted_data[0]['outputs'])} completions")
-                    print(f"First example has {len(converted_data[0]['advantages'])} advantages")
+                    print(f"First example:")
+                    print(f"  Number of completions: {len(converted_data[0]['outputs'])}")
+                    print(f"  Number of advantages: {len(converted_data[0]['advantages'])}")
+                    print(f"  First completion: {converted_data[0]['outputs'][0][:100]}...")
+                    print(f"  First advantage: {converted_data[0]['advantages'][0]}")
                     
                     # Verify all examples have G completions
                     completion_counts = [len(ex["outputs"]) for ex in converted_data]
                     if min(completion_counts) != max(completion_counts):
                         print(f"Warning: Not all examples have the same number of completions!")
                         print(f"Min: {min(completion_counts)}, Max: {max(completion_counts)}")
+                    elif min(completion_counts) != self.num_samples:
+                        print(f"Warning: Examples have {min(completion_counts)} completions, expected {self.num_samples}!")
         
         return converted_data
 

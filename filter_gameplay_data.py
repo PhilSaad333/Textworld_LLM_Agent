@@ -1,107 +1,150 @@
 import json
-import re
 import os
-from tqdm import tqdm
+import re
+from agents.textworld_llm_agent import TextWorldLLMAgent
+from config.config import get_game_config, RewardType, GoalType
 
-def check_format(text):
+def check_format_command_tags(text):
     """
-    Check if the text follows the expected format with command tags.
-    
-    Args:
-        text: Text to check
-            
-    Returns:
-        bool: Whether the text has command tags
+    Check if text has valid command tags in the correct order with no nested tags.
+    The text should contain exactly one pair of command tags with any text between them,
+    but no additional command tags.
     """
     if text is None:
         return False
     
-    # Check for command tags
-    has_command_tags = '<command>' in text and '</command>' in text
-    return has_command_tags
+    # Find all occurrences of command tags and their content
+    command_pattern = r'<command>(.*?)</command>'
+    matches = re.findall(command_pattern, text, re.DOTALL)
+    
+    # Check if we have exactly one command tag pair
+    if len(matches) != 1:
+        return False
+    
+    # Check that the content between tags doesn't contain other command tags
+    command_content = matches[0]
+    if '<command>' in command_content or '</command>' in command_content:
+        return False
+    
+    return True
 
-def filter_gameplay_data(input_file, output_file=None):
+def filter_gameplay_data(input_path, output_path):
     """
-    Filter gameplay data to keep only examples where at least one completion has correct command tags.
+    Filter gameplay data to keep only steps where at least one completion has valid command tags.
     
     Args:
-        input_file: Path to the input gameplay data JSON file
-        output_file: Path to save the filtered data (if None, will use input_file with '_filtered' suffix)
-    
-    Returns:
-        dict: Statistics about the filtering process
+        input_path: Path to unfiltered gameplay data JSON
+        output_path: Path to save filtered gameplay data JSON
     """
-    # Set default output file if not provided
-    if output_file is None:
-        base_name = os.path.splitext(input_file)[0]
-        output_file = f"{base_name}_filtered.json"
-    
-    print(f"Loading gameplay data from {input_file}...")
-    with open(input_file, 'r') as f:
+    print(f"Loading data from {input_path}")
+    with open(input_path, 'r') as f:
         data = json.load(f)
     
-    # Initialize statistics
-    stats = {
-        "total_episodes": len(data),
-        "total_steps": 0,
-        "steps_with_valid_format": 0,
-        "steps_without_valid_format": 0,
-        "filtered_episodes": 0
+    if not isinstance(data, dict) or 'data' not in data:
+        raise ValueError("Invalid data format: expected dict with 'data' key")
+    
+    # Get the original data lists
+    prompts = data['data']['prompt']
+    completions = data['data']['completion']
+    rewards = data['data']['reward']
+    completion_token_counts = data['data'].get('completion_token_counts', [])
+    
+    # Get number of completions per step (G)
+    total_examples = len(prompts)
+    if total_examples == 0:
+        raise ValueError("No examples found in data")
+    
+    # Determine G (num_samples) by finding consecutive identical prompts
+    G = 1
+    first_prompt = prompts[0]
+    while G < len(prompts) and prompts[G] == first_prompt:
+        G += 1
+    
+    print(f"Detected {G} completions per step")
+    print(f"Total examples: {total_examples}")
+    num_steps = total_examples // G
+    print(f"Number of steps: {num_steps}")
+    
+    # Lists to store filtered data
+    filtered_prompts = []
+    filtered_completions = []
+    filtered_rewards = []
+    filtered_token_counts = []
+    
+    # Process each step
+    steps_kept = 0
+    steps_filtered = 0
+    
+    for step_idx in range(num_steps):
+        start_idx = step_idx * G
+        end_idx = start_idx + G
+        
+        # Get completions for this step
+        step_completions = completions[start_idx:end_idx]
+        
+        # Check if any completion has valid command tags
+        has_valid_completion = any(check_format_command_tags(completion) for completion in step_completions)
+        
+        if has_valid_completion:
+            # Keep this step's data
+            steps_kept += 1
+            # Add all G completions and corresponding data
+            for i in range(G):
+                idx = start_idx + i
+                filtered_prompts.append(prompts[idx])
+                filtered_completions.append(completions[idx])
+                filtered_rewards.append(rewards[idx])
+                if completion_token_counts:
+                    filtered_token_counts.append(completion_token_counts[idx])
+        else:
+            steps_filtered += 1
+    
+    print(f"\nFiltering results:")
+    print(f"Steps kept: {steps_kept}")
+    print(f"Steps filtered: {steps_filtered}")
+    print(f"Total steps processed: {steps_kept + steps_filtered}")
+    
+    # Create filtered data dictionary
+    filtered_data = {
+        'data': {
+            'prompt': filtered_prompts,
+            'completion': filtered_completions,
+            'reward': filtered_rewards,
+        },
+        'metadata': {
+            'original_file': input_path,
+            'filtering_stats': {
+                'steps_kept': steps_kept,
+                'steps_filtered': steps_filtered,
+                'completions_per_step': G,
+                'total_completions_kept': len(filtered_completions)
+            }
+        }
     }
     
-    filtered_data = []
+    # Add completion token counts if they existed in original data
+    if completion_token_counts:
+        filtered_data['data']['completion_token_counts'] = filtered_token_counts
     
-    # Process each episode
-    for episode_idx, episode in enumerate(tqdm(data, desc="Filtering episodes")):
-        filtered_episode = []
-        episode_has_valid_steps = False
-        
-        # Process each step in the episode
-        for step in episode:
-            stats["total_steps"] += 1
-            
-            # Check if any completion has correct command tags
-            has_valid_format = False
-            if "completions" in step:
-                for completion in step["completions"]:
-                    if check_format(completion):
-                        has_valid_format = True
-                        break
-            
-            # If at least one completion has correct format, keep this step
-            if has_valid_format:
-                filtered_episode.append(step)
-                stats["steps_with_valid_format"] += 1
-                episode_has_valid_steps = True
-            else:
-                stats["steps_without_valid_format"] += 1
-        
-        # Only keep episodes that have at least one valid step
-        if episode_has_valid_steps:
-            filtered_data.append(filtered_episode)
-            stats["filtered_episodes"] += 1
+    # Preserve any other metadata from original file
+    if 'metadata' in data:
+        filtered_data['metadata'].update({
+            k: v for k, v in data['metadata'].items() 
+            if k not in filtered_data['metadata']
+        })
     
     # Save filtered data
-    print(f"Saving filtered data to {output_file}...")
-    with open(output_file, 'w') as f:
-        json.dump(filtered_data, f, indent=2)
+    print(f"\nSaving filtered data to {output_path}")
+    with open(output_path, 'w') as f:
+        json.dump(filtered_data, f)
     
-    # Print statistics
-    print("\nFiltering Statistics:")
-    print(f"Total episodes: {stats['total_episodes']}")
-    print(f"Episodes with valid steps: {stats['filtered_episodes']} ({stats['filtered_episodes']/stats['total_episodes']*100:.2f}%)")
-    print(f"Total steps: {stats['total_steps']}")
-    print(f"Steps with valid format: {stats['steps_with_valid_format']} ({stats['steps_with_valid_format']/stats['total_steps']*100:.2f}%)")
-    print(f"Steps without valid format: {stats['steps_without_valid_format']} ({stats['steps_without_valid_format']/stats['total_steps']*100:.2f}%)")
-    
-    return stats
+    print("Done!")
+    return filtered_data
 
-# Example usage in a Colab cell:
 if __name__ == "__main__":
-    # Set your gameplay data path
-    gameplay_data_path = '/content/drive/MyDrive/textworld_rl_data/gameplay_data_1.json'
+    # Paths
+    input_path = "/content/drive/MyDrive/textworld_rl_data/gameplay_data_1.json"
+    output_path = "/content/drive/MyDrive/textworld_rl_data/gameplay_data_1_filtered_fixed.json"
     
-    # Filter the data
-    stats = filter_gameplay_data(gameplay_data_path)
-    
-    # The filtered data will be saved to '/content/drive/MyDrive/textworld_rl_data/gameplay_data_1_filtered.json' 
+    # Filter data
+    filtered_data = filter_gameplay_data(input_path, output_path) 
