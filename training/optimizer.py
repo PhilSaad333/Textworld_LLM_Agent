@@ -44,52 +44,31 @@ class MyGRPOOptimizer:
         print(f"Initialized GRPO optimizer with {self.num_samples} samples, epsilon={self.epsilon}, beta={self.beta}")
         print(f"Reward parameters: format_reward={self.format_reward}, format_penalty={self.format_penalty}, room_reward={self.room_reward}, room_penalty={self.room_penalty}")
         
-    def compute_advantages(self, trajectories):
+    def compute_advantages(self, steps_data):
         """
         Compute advantages for each step in the trajectories
         
         Args:
-            trajectories: List of trajectories
+            steps_data: Pre-collected gameplay data
             
         Returns:
-            Dictionary mapping (trajectory_idx, step_idx) to a list of advantages
+            step_advantages: List of advantages for each step
         """
-        advantages_dict = {}
-        all_rewards = []
+        step_advantages = []
         
         # First pass: collect all rewards
-        for trajectory in trajectories:
-            for step in trajectory["steps"]:
-                rewards = step.get("rewards", [0.0])
-                all_rewards.extend(rewards)
-        
-        # Compute mean and std of rewards for normalization
-        if all_rewards:
-            rewards_mean = sum(all_rewards) / len(all_rewards)
-            rewards_std = (sum((r - rewards_mean) ** 2 for r in all_rewards) / len(all_rewards)) ** 0.5
-            
+        for step in steps_data:
+            step_rewards = step.get("rewards", [0.0])
+            # Compute mean and std of rewards for normalization
+            rewards_mean = sum(step_rewards) / len(step_rewards)
+            rewards_std = (sum((r - rewards_mean) ** 2 for r in step_rewards) / len(step_rewards)) ** 0.5
             # Avoid division by zero
             if rewards_std < 1e-8:
                 rewards_std = 1.0
-        else:
-            rewards_mean = 0.0
-            rewards_std = 1.0
+            advantages = [(r - rewards_mean) / rewards_std for r in step_rewards]
+            step_advantages.append(advantages)
         
-        print(f"Rewards statistics: mean={rewards_mean:.4f}, std={rewards_std:.4f}")
-        
-        # Second pass: compute normalized advantages
-        for traj_idx, trajectory in enumerate(tqdm(trajectories, desc="Computing advantages")):
-            for step_idx, step in enumerate(trajectory["steps"]):
-                # Get rewards for this step
-                rewards = step.get("rewards", [0.0])
-                
-                # Normalize rewards to get advantages
-                advantages = [(r - rewards_mean) / rewards_std for r in rewards]
-                
-                # Store advantages in the dictionary
-                advantages_dict[(traj_idx, step_idx)] = advantages
-        
-        return advantages_dict
+        return step_advantages
     
     def _compute_ppo_loss(self, logprobs, old_logprobs, advantages):
         """
@@ -178,13 +157,13 @@ class MyGRPOOptimizer:
         
         return kl_penalty
         
-    def optimize(self, agent, trajectories, save_path=None, save_each_epoch=False):
+    def optimize(self, agent, steps_data, save_path=None, save_each_epoch=False):
         """
         Optimize the policy using GRPO
         
         Args:
             agent: TextWorldLLMAgent instance
-            trajectories: List of trajectories
+            steps_data: Pre-collected gameplay data
             save_path: Path to save the model
             save_each_epoch: If True, save model after each epoch
             
@@ -194,35 +173,29 @@ class MyGRPOOptimizer:
         print("Optimizing policy using GRPO...")
         
         # Compute advantages for all trajectories
-        print("Computing advantages for trajectories...")
-        advantages_dict = self.compute_advantages(trajectories)
+        step_advantages = self.compute_advantages(steps_data)
         
         # Prepare data for training, maintaining the structure of prompts and completions
         # Each entry in structured_data is a prompt with its G completions and advantages
         structured_data = []
         
-        for trajectory in tqdm(trajectories, desc="Preparing data"):
-            for step in trajectory["steps"]:
-                state = step["state"]
-                outputs = step["outputs"]
+        for step, advantages in zip(steps_data, step_advantages):
+            state = step["state"]
+            outputs = step["outputs"]
                 
-                # Get the advantage for this step
-                step_idx = step["step"]
-                traj_idx = trajectory["episode"]
-                advantages = advantages_dict.get((traj_idx, step_idx), [0.0] * len(outputs))
-                
-                # Create a data point with the prompt and all its completions
-                structured_data.append({
-                    "state": state,
-                    "outputs": outputs,
-                    "advantages": advantages
-                })
+            # Create a data point with the prompt and all its completions
+            structured_data.append({
+                "state": state,
+                "outputs": outputs,
+                "advantages": advantages,
+                "old_logprobs": None
+            })
         
         # Shuffle the prompts (but keep completions together)
         random.shuffle(structured_data)
         
         # Create batches of B prompts
-        batch_size = self.batch_size  # B in the GRPO paper
+        batch_size = self.batch_size
         batches = [structured_data[i:i+batch_size] for i in range(0, len(structured_data), batch_size)]
         
         # Set up optimizer
@@ -259,7 +232,50 @@ class MyGRPOOptimizer:
             epoch_advantage_mean = 0.0
             epoch_advantage_min = float('inf')
             epoch_advantage_max = float('-inf')
-            
+
+            # At the beginning of each epoch, compute old logprobs for all prompts
+            print(f"Computing old logprobs for epoch {epoch+1}...")
+            with torch.no_grad():  # Explicitly use no_grad for the entire block
+                for batch_idx, batch in enumerate(tqdm(batches, desc=f"Computing old logprobs")):
+                    for prompt_data in batch:
+                        state = prompt_data["state"]
+                        outputs = prompt_data["outputs"]
+                        
+                        # Tokenize the prompt once outside the completion loop
+                        input_tokens = agent.tokenizer(
+                            state,
+                            padding="max_length",
+                            truncation=True,
+                            max_length=self.config.max_input_length if hasattr(self.config, 'max_input_length') else 512,
+                            return_tensors="pt"
+                        ).to(self.device)
+                        
+                        old_logprobs_list = []
+                        # Process all completions for this prompt
+                        for output in outputs:
+                            output_tokens = agent.tokenizer(
+                                output,
+                                padding="max_length",
+                                truncation=True,
+                                max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
+                                return_tensors="pt"
+                            ).to(self.device)
+                            
+                            # We don't need with_grad=False here since we're in a no_grad block
+                            old_logprobs = self._compute_logprobs(agent.model, input_tokens, output_tokens, 0)
+                            old_logprobs_list.append(old_logprobs)
+                            
+                            # Optional: Clear cache periodically to prevent OOM
+                            if len(old_logprobs_list) % 100 == 0:
+                                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                        
+                        prompt_data["old_logprobs"] = old_logprobs_list
+                        
+                    # Print progress every few batches
+                    if batch_idx % 10 == 0:
+                        print(f"  Computed old logprobs for {batch_idx}/{len(batches)} batches")
+
+
             for batch_idx, batch in enumerate(tqdm(batches, desc=f"Epoch {epoch+1}")):
                 batch_loss = 0.0
                 batch_ppo_loss = 0.0
@@ -277,7 +293,7 @@ class MyGRPOOptimizer:
                     batch_advantages.extend(prompt_data["advantages"])
                     
                     # Tokenize the prompt once
-                    inputs = agent.tokenizer(
+                    input_tokens = agent.tokenizer(
                         state,
                         padding="max_length",
                         truncation=True,
@@ -285,31 +301,14 @@ class MyGRPOOptimizer:
                         return_tensors="pt"
                     ).to(self.device)
                     
-                    # Get old log probabilities for all completions
-                    old_logprobs_list = []
-                    
-                    for i, output in enumerate(outputs):
-                        # Tokenize output
-                        output_tokens = agent.tokenizer(
-                            output,
-                            padding="max_length",
-                            truncation=True,
-                            max_length=self.config.max_completion_length if hasattr(self.config, 'max_completion_length') else 128,
-                            return_tensors="pt"
-                        ).to(self.device)
-                        
-                        # Get log probabilities for the output (without gradients)
-                        old_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, 0, with_grad=False)
-                        old_logprobs_list.append(old_logprobs)
-                    
-                    # Combine old log probabilities
+                    old_logprobs_list = prompt_data["old_logprobs"]
                     old_logprobs = torch.cat(old_logprobs_list, dim=0)
                     
                     # Compute new log probabilities and policy loss
                     optimizer.zero_grad()
                     
                     new_logprobs_list = []
-                    for i, output in enumerate(outputs):
+                    for output in outputs:
                         # Tokenize output
                         output_tokens = agent.tokenizer(
                             output,
@@ -320,7 +319,7 @@ class MyGRPOOptimizer:
                         ).to(self.device)
                         
                         # Get log probabilities for the output (with gradients)
-                        new_logprobs = self._compute_logprobs(agent.model, inputs, output_tokens, 0, with_grad=True)
+                        new_logprobs = self._compute_logprobs(agent.model, input_tokens, output_tokens, 0, with_grad=True)
                         new_logprobs_list.append(new_logprobs)
                     
                     # Combine new log probabilities
@@ -329,7 +328,8 @@ class MyGRPOOptimizer:
                     # Debug ratios
                     with torch.no_grad():
                         ratios = torch.exp(new_logprobs - old_logprobs)
-                        batch_ratios.extend(ratios.cpu().numpy().tolist())
+                        batch_ratios.extend(ratios.cpu().numpy().tolist())                
+                        print(f"\nStep ratios: {ratios}")
                     
                     # Compute PPO loss for this prompt (average over its completions)
                     prompt_ppo_loss = self._compute_ppo_loss(new_logprobs, old_logprobs, advantages)
@@ -402,12 +402,6 @@ class MyGRPOOptimizer:
                         print(f"    Outputs: {len(prompt_data['outputs'])} completions")
                         print(f"    Advantages: {len(prompt_data['advantages'])} values")
                 
-                # Before processing each batch:
-                print("\nBatch log probability details:")
-                print(f"Old logprobs: {old_logprobs}")
-                print(f"New logprobs: {new_logprobs}")
-                print(f"Log ratio: {new_logprobs - old_logprobs}")
-                print(f"Ratio: {torch.exp(new_logprobs - old_logprobs)}")
             
             # Compute average metrics for the epoch
             num_batches = len(batches)
@@ -448,7 +442,7 @@ class MyGRPOOptimizer:
         
         return metrics
     
-    def train(self, agent, env=None, num_iterations=5, num_episodes_per_iteration=5, max_steps=10, save_path=None, trajectories=None, save_each_epoch=False):
+    def train(self, agent, env=None, num_iterations=5, num_episodes_per_iteration=5, max_steps=10, save_path=None, steps_data=None, save_each_epoch=False):
         """
         Train the agent using GRPO with pre-collected trajectories
         
@@ -459,7 +453,7 @@ class MyGRPOOptimizer:
             num_episodes_per_iteration: Not used, kept for backward compatibility
             max_steps: Not used, kept for backward compatibility
             save_path: Path to save the trained model
-            trajectories: Pre-collected trajectories
+            steps_data: Pre-collected gameplay data
             save_each_epoch: If True, save model after each epoch
             
         Returns:
@@ -467,7 +461,7 @@ class MyGRPOOptimizer:
         """
         print("Training agent using GRPO with pre-collected trajectories...")
         
-        if trajectories is None:
+        if steps_data is None:
             raise ValueError("Trajectories must be provided for training")
         
         all_metrics = {
@@ -478,12 +472,12 @@ class MyGRPOOptimizer:
         }
         
         # Compute average reward
-        avg_reward = self._compute_average_reward(trajectories)
+        avg_reward = self._compute_average_reward(steps_data)
         all_metrics["rewards"].append(avg_reward)
         print(f"Average reward from pre-collected trajectories: {avg_reward:.4f}")
         
         # Optimize policy
-        metrics = self.optimize(agent, trajectories, save_path=save_path, save_each_epoch=save_each_epoch)
+        metrics = self.optimize(agent, steps_data, save_path=save_path, save_each_epoch=save_each_epoch)
         
         # Update metrics
         all_metrics["loss"].extend(metrics["loss"])
@@ -498,7 +492,7 @@ class MyGRPOOptimizer:
         
         return all_metrics
     
-    def _compute_average_reward(self, trajectories):
+    def _compute_average_reward(self, steps_data):
         """
         Compute average reward across all trajectories
         
@@ -511,11 +505,10 @@ class MyGRPOOptimizer:
         total_reward = 0.0
         total_steps = 0
         
-        for trajectory in trajectories:
-            for step in trajectory["steps"]:
-                rewards = step.get("rewards", [0.0])
-                total_reward += sum(rewards)
-                total_steps += len(rewards)
+        for step in steps_data:
+            rewards = step.get("rewards", [0.0])
+            total_reward += sum(rewards)
+            total_steps += len(rewards)
         
         if total_steps == 0:
             return 0.0
@@ -564,7 +557,7 @@ class MyGRPOOptimizer:
         output_ids = output_tokens.input_ids[0]
         
         # Check if we're using an encoder-decoder model (like T5) or a decoder-only model (like GPT)
-        is_encoder_decoder = getattr(model.config, "is_encoder_decoder", False)
+        is_encoder_decoder = getattr(model.config, "is_encoder_decoder", True)
         
         # Prepare model inputs
         model_inputs = {
@@ -639,100 +632,5 @@ class MyGRPOOptimizer:
         else:
             return torch.tensor([-20.0], device=self.device)  # Return a reasonable default value
 
-    def _convert_data_for_custom_grpo(self, data):
-        """Convert gameplay data to the format expected by the custom GRPO optimizer.
-        
-        Expected input format:
-        {
-            'data': {
-                'prompt': [prompt1, prompt2, ...],
-                'completion': [completion1, completion2, ...],
-                'reward': [reward1, reward2, ...],
-            }
-        }
-        
-        Expected output format:
-        [
-            {
-                "state": prompt1,
-                "outputs": [completion1_1, completion1_2, ..., completion1_G],
-                "advantages": [advantage1_1, advantage1_2, ..., advantage1_G],
-                "old_logprobs": None  # Will be computed during training
-            },
-            ...
-        ]
-        """
-        converted_data = []
-        
-        # Check if data is in the expected format
-        if isinstance(data, dict) and 'data' in data:
-            data_content = data['data']
-            
-            if 'prompt' in data_content and 'completion' in data_content and 'reward' in data_content:
-                prompts = data_content['prompt']
-                completions = data_content['completion']
-                rewards = data_content['reward']
-                
-                # Group by prompt indices
-                num_total = len(prompts)
-                num_groups = num_total // self.num_samples
-                
-                print(f"\nGrouping data:")
-                print(f"Total examples: {num_total}")
-                print(f"Group size (G): {self.num_samples}")
-                print(f"Number of complete groups: {num_groups}")
-                
-                # Process each complete group
-                for group_idx in range(num_groups):
-                    start_idx = group_idx * self.num_samples
-                    end_idx = start_idx + self.num_samples
-                    
-                    # Get the prompt (should be the same for all completions in group)
-                    prompt = prompts[start_idx]
-                    
-                    # Verify all prompts in the group are the same
-                    if not all(prompts[i] == prompt for i in range(start_idx, end_idx)):
-                        print(f"Warning: Not all prompts in group {group_idx} are the same!")
-                        continue
-                    
-                    # Get completions and rewards for this group
-                    group_completions = completions[start_idx:end_idx]
-                    group_rewards = rewards[start_idx:end_idx]
-                    
-                    # Convert rewards to advantages
-                    advantages = self._compute_advantages_from_rewards(group_rewards)
-                    
-                    # Add example
-                    converted_data.append({
-                        "state": prompt,
-                        "outputs": group_completions,
-                        "advantages": advantages,
-                        "old_logprobs": None  # Will be computed during training
-                    })
-                
-                # Print debug information
-                print(f"\nConverted {len(converted_data)} examples")
-                if converted_data:
-                    print(f"First example:")
-                    print(f"  Number of completions: {len(converted_data[0]['outputs'])}")
-                    print(f"  Number of advantages: {len(converted_data[0]['advantages'])}")
-                    print(f"  First completion: {converted_data[0]['outputs'][0][:100]}...")
-                    print(f"  First advantage: {converted_data[0]['advantages'][0]}")
-                    
-                    # Verify all examples have G completions
-                    completion_counts = [len(ex["outputs"]) for ex in converted_data]
-                    if min(completion_counts) != max(completion_counts):
-                        print(f"Warning: Not all examples have the same number of completions!")
-                        print(f"Min: {min(completion_counts)}, Max: {max(completion_counts)}")
-                    elif min(completion_counts) != self.num_samples:
-                        print(f"Warning: Examples have {min(completion_counts)} completions, expected {self.num_samples}!")
-        
-        return converted_data
 
-    def _compute_advantages_from_rewards(self, rewards):
-        """Convert rewards to advantages by normalizing"""
-        rewards = np.array(rewards)
-        advantages = rewards - np.mean(rewards)
-        if np.std(advantages) > 0:
-            advantages = advantages / np.std(advantages)
-        return advantages.tolist()
+

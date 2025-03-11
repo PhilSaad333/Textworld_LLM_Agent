@@ -572,98 +572,6 @@ class TextWorldRLTrainer:
         
         return save_path
     
-    def save_enhanced_gameplay_data(self, data_path=None):
-        """Save enhanced gameplay data with additional statistics
-        
-        Args:
-            data_path: Path to the original gameplay data (if None, uses the last saved path)
-            
-        Returns:
-            Path to the enhanced gameplay data
-        """
-        # Use last saved path if no path provided
-        if data_path is None:
-            if hasattr(self, 'last_saved_data_path'):
-                data_path = self.last_saved_data_path
-            else:
-                raise ValueError("No data path provided and no previous save found")
-        
-        # Create a timestamp for the filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Create the enhanced data path
-        save_dir = os.path.dirname(data_path)
-        filename = os.path.basename(data_path)
-        enhanced_data_path = f"{save_dir}/enhanced_{filename.replace('.json', '')}_{timestamp}.json"
-        
-        # Load the original data
-        with open(data_path, 'r') as f:
-            data_dict = json.load(f)
-        
-        # Create enhanced metadata
-        enhanced_metadata = {
-            "enhancement_timestamp": timestamp,
-            "original_data_path": data_path,
-            "model_source": self.model.config.name_or_path,
-            "format_penalty": self.config.format_penalty if hasattr(self.config, 'format_penalty') else None,
-            "room_penalty": self.config.room_penalty if hasattr(self.config, 'room_penalty') else None,
-            "description": "Enhanced gameplay data with additional statistics"
-        }
-        
-        # If we have episode data available, add statistics
-        if hasattr(self, 'episode_data'):
-            # Calculate format error rate
-            format_errors = 0
-            total_completions = 0
-            
-            for episode in self.episode_data:
-                for step in episode["steps"]:
-                    for completion in step["completions"]:
-                        total_completions += 1
-                        format_check = self.agent.check_format(completion)
-                        if not (format_check["has_command_tags"] and format_check["has_room_tags"]):
-                            format_errors += 1
-            
-            format_error_rate = format_errors / total_completions if total_completions > 0 else 0
-            enhanced_metadata["format_error_rate"] = format_error_rate
-            enhanced_metadata["total_completions"] = total_completions
-            enhanced_metadata["format_errors"] = format_errors
-            
-            # Add episode success rate
-            successful_episodes = sum(1 for episode in self.episode_data if episode["success"])
-            total_episodes = len(self.episode_data)
-            success_rate = successful_episodes / total_episodes if total_episodes > 0 else 0
-            enhanced_metadata["episode_success_rate"] = success_rate
-            enhanced_metadata["successful_episodes"] = successful_episodes
-            enhanced_metadata["total_episodes"] = total_episodes
-            
-            # Add difficulty breakdown
-            difficulty_stats = {}
-            for difficulty in set(episode["difficulty"] for episode in self.episode_data):
-                episodes_at_difficulty = [ep for ep in self.episode_data if ep["difficulty"] == difficulty]
-                successful_at_difficulty = sum(1 for ep in episodes_at_difficulty if ep["success"])
-                success_rate_at_difficulty = successful_at_difficulty / len(episodes_at_difficulty) if episodes_at_difficulty else 0
-                
-                difficulty_stats[str(difficulty)] = {
-                    "episodes": len(episodes_at_difficulty),
-                    "successful": successful_at_difficulty,
-                    "success_rate": success_rate_at_difficulty
-                }
-            
-            enhanced_metadata["difficulty_stats"] = difficulty_stats
-        
-        # Add enhanced metadata to the data dictionary
-        data_dict["enhanced_metadata"] = enhanced_metadata
-        
-        # Save the enhanced data
-        with open(enhanced_data_path, 'w') as f:
-            json.dump(data_dict, f, indent=2)
-        
-        print(f"Enhanced gameplay data saved to {enhanced_data_path}")
-        print(f"Format error rate: {enhanced_metadata.get('format_error_rate', 'N/A') * 100:.1f}%")
-        print(f"Episode success rate: {enhanced_metadata.get('episode_success_rate', 'N/A') * 100:.1f}%")
-        
-        return enhanced_data_path
     
     def load_gameplay_data(self, file_path=None):
         """Load gameplay data from a JSON file
@@ -783,21 +691,21 @@ class TextWorldRLTrainer:
         print("Training with custom GRPO implementation...")
         
         # Convert gameplay data to trajectories format expected by our GRPO optimizer
-        trajectories = self._convert_data_for_custom_grpo()
+        steps_data = self._convert_data_for_custom_grpo()
         
-        if not trajectories:
-            raise ValueError("No valid trajectories found. Please check your gameplay data.")
+        if not steps_data:
+            raise ValueError("No valid samples found. Please check your gameplay data.")
         
         # Print training parameters
         print(f"Training with pre-collected data:")
-        print(f"  trajectories: {len(trajectories)} episodes with {sum(len(t['steps']) for t in trajectories)} total steps")
+        print(f"  {len(steps_data)} total steps in data")
         print(f"  save_path: {save_model_path}")
         print(f"  save_each_epoch: {save_each_epoch}")
         
         # Train using our custom GRPO optimizer with pre-collected trajectories
         metrics = self.grpo_optimizer.train(
             agent=self.agent,
-            trajectories=trajectories,  # Pass pre-collected trajectories
+            steps_data=steps_data,  # Pass pre-collected trajectories
             save_path=save_model_path,
             save_each_epoch=save_each_epoch
         )
@@ -833,10 +741,15 @@ class TextWorldRLTrainer:
         Ensures that G completions for each step are kept together.
         
         Returns:
-            List of trajectories in the format expected by our GRPO optimizer
+            List of step dictionaries, each containing:
+            {
+                "state": prompt,
+                "outputs": [completion1, completion2, ..., completionG],
+                "rewards": [reward1, reward2, ..., rewardG]
+            }
         """
         print("Converting gameplay data to GRPO format...")
-        trajectories = []
+        steps_data = []  # Will hold all steps without episode structure
         
         # Handle different input formats
         if hasattr(self.gameplay_data, 'to_dict') and callable(getattr(self.gameplay_data, 'to_dict')):
@@ -880,12 +793,6 @@ class TextWorldRLTrainer:
         print(f"Total examples: {total_examples}")
         print(f"Number of steps: {num_steps}")
         
-        # Create one trajectory that contains all steps
-        trajectory = {
-            'episode': 0,
-            'steps': []
-        }
-        
         # Process each step (group of G completions)
         for step_idx in range(num_steps):
             start_idx = step_idx * G
@@ -914,38 +821,33 @@ class TextWorldRLTrainer:
             
             # Create step data with all G completions
             step_data = {
-                'step': step_idx,
-                'state': prompt,
-                'states': [prompt] * G,  # Same prompt for all samples
-                'outputs': step_completions,  # All G completions
-                'rewards': step_rewards,  # All G rewards
+                "state": prompt,
+                "outputs": step_completions,
+                "rewards": step_rewards
             }
             
-            trajectory['steps'].append(step_data)
+            steps_data.append(step_data)
         
-        # Only add trajectory if it has steps
-        if len(trajectory['steps']) > 0:
-            trajectories.append(trajectory)
+        # Print debug information
+        print(f"\nConverted data structure:")
+        print(f"Number of steps: {len(steps_data)}")
+        
+        if steps_data:
+            first_step = steps_data[0]
+            print(f"\nFirst step details:")
+            print(f"Number of completions: {len(first_step['outputs'])}")
+            print(f"Number of rewards: {len(first_step['rewards'])}")
+            print(f"First completion: {first_step['outputs'][0][:100]}...")
+            print(f"Rewards: {first_step['rewards']}")
+            
+            # Verify all steps have G completions
+            completion_counts = [len(step["outputs"]) for step in steps_data]
+            if min(completion_counts) != max(completion_counts):
+                print(f"Warning: Not all steps have the same number of completions!")
+                print(f"Min: {min(completion_counts)}, Max: {max(completion_counts)}")
+            elif min(completion_counts) != G:
+                print(f"Warning: Steps have {min(completion_counts)} completions, expected {G}!")
         else:
             print("Warning: No valid steps found after filtering!")
         
-        print(f"\nConverted data structure:")
-        print(f"Number of trajectories: {len(trajectories)}")
-        if trajectories:
-            print(f"Steps in trajectory: {len(trajectories[0]['steps'])}")
-            if trajectories[0]['steps']:
-                first_step = trajectories[0]['steps'][0]
-                print(f"\nFirst step details:")
-                print(f"Number of completions: {len(first_step['outputs'])}")
-                print(f"Number of rewards: {len(first_step['rewards'])}")
-                print(f"First completion: {first_step['outputs'][0][:100]}...")
-                print(f"Rewards: {first_step['rewards']}")
-                
-                # Additional verification of first step
-                print("\nVerifying first step structure:")
-                print(f"All prompts identical: {all(p == first_step['state'] for p in first_step['states'])}")
-                print(f"Number of states: {len(first_step['states'])}")
-                print(f"Number of outputs: {len(first_step['outputs'])}")
-                print(f"Number of rewards: {len(first_step['rewards'])}")
-        
-        return trajectories
+        return steps_data
