@@ -302,16 +302,16 @@ class Rollout:
         """Compute the total reward including format and room prediction penalties"""
         total_reward = self.reward  # Base reward from the environment
         
-        # Format penalty - only apply for missing command or room tags
+        # Format penalty - apply for missing tags
         if hasattr(self, 'format_check_result'):
             format_check_result = self.format_check_result
             
-            # Apply partial penalties based on what's missing
+            # Apply penalties with focus on command tags
             if not format_check_result.get("has_command_tags", False):
-                total_reward += config.format_penalty * 0.75
+                total_reward += config.format_penalty * 0.75  # Major penalty for missing command tags
             
             if not format_check_result.get("has_room_tags", False):
-                total_reward += config.format_penalty * 0.25
+                total_reward += config.format_penalty * 0.25  # Minor penalty for missing room tags
         elif hasattr(self, 'format_check_passed') and not self.format_check_passed:
             # Fallback if we don't have detailed format check result
             total_reward += config.format_penalty

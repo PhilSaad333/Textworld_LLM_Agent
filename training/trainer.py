@@ -493,16 +493,16 @@ class TextWorldRLTrainer:
             # Check format of the current completion
             format_check_result = self.agent.check_format(completion)
             
-            # Apply format penalty ONLY for command and room tags
+            # Apply format penalty based on missing tags
             format_reward = 0.0  # Start with no penalty
             
-            # Check command tags
+            # Check command tags - apply major penalty if missing
             if not format_check_result["has_command_tags"]:
-                format_reward += self.config.format_penalty / 2  # Half penalty for missing command tags
+                format_reward += self.config.format_penalty * 0.75  # Major penalty for missing command tags
             
-            # Check room tags
+            # Check room tags - apply minor penalty if missing
             if not format_check_result["has_room_tags"]:
-                format_reward += self.config.format_penalty / 2  # Half penalty for missing room tags
+                format_reward += self.config.format_penalty * 0.25  # Minor penalty for missing room tags
             
             rewards.append(format_reward)
         

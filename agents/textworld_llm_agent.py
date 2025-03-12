@@ -67,9 +67,9 @@ class TextWorldLLMAgent:
                     # Initialize tokenizer first
                     self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                     
-                    # Add special tokens for command and room tags
+                    # Add special tokens for the single tag
                     special_tokens = {
-                        'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+                        'additional_special_tokens': ['<tag>']
                     }
                     
                     # Add pad token if it doesn't exist (for some autoregressive models)
@@ -124,9 +124,9 @@ class TextWorldLLMAgent:
                     
                     self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
                     
-                    # Add special tokens for command and room tags
+                    # Add special tokens for the single tag
                     special_tokens = {
-                        'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+                        'additional_special_tokens': ['<tag>']
                     }
                     
                     # Add pad token if it doesn't exist (for some autoregressive models)
@@ -341,11 +341,11 @@ Generate a *concise* response in the following format:
 
 A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve. 
 
-B) State your chosen action - Make sure it is in the list of Available actions:
-Therefore, I choose: <command>[exact action]</command>
+B) State your chosen action - It must be in the list of Available actions:
+Therefore, I choose: <tag>[exact action]<tag>
 
 C) State your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
-I predict that I will be in room: <room>[room name]</room>
+I predict that I will be in room: <tag>[room name]<tag>
 
 Your response:"""
 
@@ -664,9 +664,9 @@ Your response:"""
             
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             
-            # Add special tokens for command and room tags
+            # Add special tokens for the single tag
             special_tokens = {
-                'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+                'additional_special_tokens': ['<tag>']
             }
             
             # Add pad token if it doesn't exist (for some autoregressive models)
@@ -815,16 +815,16 @@ Your response:"""
 
     def check_format(self, text):
         """
-        Check if the text follows the expected format with properly formatted command and room tags.
-        Ensures that tags are properly nested and don't contain other special tags.
+        Check if the text follows the expected format with <tag> tokens.
+        Extracts command and room based on the position of <tag> tokens.
         
         Args:
             text: Text to check
             
         Returns:
             dict: Format check results including:
-                - has_command_tags: Whether text has properly formatted <command> tags
-                - has_room_tags: Whether text has properly formatted <room> tags
+                - has_command_tags: Whether text has properly formatted command tags
+                - has_room_tags: Whether text has properly formatted room tags
                 - command: Extracted command (or None if not found)
                 - room: Extracted room (or None if not found)
         """
@@ -836,37 +836,69 @@ Your response:"""
                 "room": None
             }
         
-        # Check for command tags and extract content
+        # Find all <tag> occurrences
+        tag_positions = [m.start() for m in re.finditer(r'<tag>', text)]
+        
+        # We need at least 2 tags for a command
+        if len(tag_positions) < 2:
+            return {
+                "has_command_tags": False,
+                "has_room_tags": False,
+                "command": None,
+                "room": None
+            }
+        
+        # Extract command and room based on tag positions
         command = None
-        has_command_tags = False
-        command_matches = re.finditer(r'<command>(.*?)</command>', text, re.DOTALL)
-        
-        for match in command_matches:
-            command_text = match.group(1).strip()
-            # Check if the command contains any other tags
-            if '<command>' in command_text or '</command>' in command_text or '<room>' in command_text or '</room>' in command_text:
-                continue  # Skip this match as it contains nested tags
-            
-            if command_text:  # Only accept non-empty commands
-                command = command_text
-                has_command_tags = True
-                break  # Use the first valid command
-        
-        # Check for room tags and extract content
         room = None
+        has_command_tags = False
         has_room_tags = False
-        room_matches = re.finditer(r'<room>(.*?)</room>', text, re.DOTALL)
         
-        for match in room_matches:
-            room_text = match.group(1).strip()
-            # Check if the room contains any other tags
-            if '<command>' in room_text or '</command>' in room_text or '<room>' in room_text or '</room>' in room_text:
-                continue  # Skip this match as it contains nested tags
+        # Check if we have exactly 4 tags (2 for command, 2 for room)
+        if len(tag_positions) >= 4:
+            # Extract command (between first and second tag)
+            command_start = tag_positions[0] + len("<tag>")
+            command_end = tag_positions[1]
+            if command_start < command_end:
+                command = text[command_start:command_end].strip()
+                if command:
+                    has_command_tags = True
             
-            if room_text:  # Only accept non-empty rooms
-                room = room_text
-                has_room_tags = True
-                break  # Use the first valid room
+            # Extract room (between third and fourth tag)
+            room_start = tag_positions[2] + len("<tag>")
+            room_end = tag_positions[3]
+            if room_start < room_end:
+                room = text[room_start:room_end].strip()
+                if room:
+                    has_room_tags = True
+        
+        # If we don't have 4 tags or couldn't extract both command and room,
+        # try to extract just the command (between first and second tag)
+        if not has_command_tags and len(tag_positions) >= 2:
+            command_start = tag_positions[0] + len("<tag>")
+            command_end = tag_positions[1]
+            if command_start < command_end:
+                command = text[command_start:command_end].strip()
+                if command:
+                    has_command_tags = True
+        
+        # Look for command context to improve extraction
+        if not has_command_tags:
+            # Try to find "Therefore, I choose: <tag> ... <tag>"
+            command_match = re.search(r'Therefore,\s*I\s*choose:\s*<tag>(.*?)<tag>', text, re.IGNORECASE | re.DOTALL)
+            if command_match:
+                command = command_match.group(1).strip()
+                if command:
+                    has_command_tags = True
+        
+        # Look for room context to improve extraction
+        if not has_room_tags:
+            # Try to find "I predict that I will be in room: <tag> ... <tag>"
+            room_match = re.search(r'I\s*predict\s*that\s*I\s*will\s*be\s*in\s*room:\s*<tag>(.*?)<tag>', text, re.IGNORECASE | re.DOTALL)
+            if room_match:
+                room = room_match.group(1).strip()
+                if room:
+                    has_room_tags = True
         
         return {
             "has_command_tags": has_command_tags,

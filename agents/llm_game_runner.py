@@ -299,7 +299,7 @@ class LLMGameRunner:
                 # Calculate format correctness across beam
                 if "all_format_checks" in info:
                     format_correct_ratio = sum(1 for fc in info["all_format_checks"] 
-                                              if fc.get("has_command_tags", False) and fc.get("has_room_tags", False)) / len(info["all_format_checks"])
+                                              if fc.get("has_command_tags", False)) / len(info["all_format_checks"])
                     step_record["beam_format_correctness"] = format_correct_ratio
                     self.statistics["beam_format_correctness"].append(format_correct_ratio)
             
