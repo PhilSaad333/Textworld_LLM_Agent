@@ -308,10 +308,10 @@ class Rollout:
             
             # Apply partial penalties based on what's missing
             if not format_check_result.get("has_command_tags", False):
-                total_reward += config.format_penalty / 2
+                total_reward += config.format_penalty * 0.75
             
             if not format_check_result.get("has_room_tags", False):
-                total_reward += config.format_penalty / 2
+                total_reward += config.format_penalty * 0.25
         elif hasattr(self, 'format_check_passed') and not self.format_check_passed:
             # Fallback if we don't have detailed format check result
             total_reward += config.format_penalty

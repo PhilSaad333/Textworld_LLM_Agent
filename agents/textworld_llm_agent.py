@@ -448,9 +448,10 @@ Your response:"""
                     print(f"Command: {format_check['command']}")
                     print(f"Room: {format_check['room']}")
                 
-                if format_check["has_command_tags"] and format_check["has_room_tags"]:
+                # Modified condition: Only require command tags to be present
+                if format_check["has_command_tags"]:
                     action = format_check["command"]
-                    predicted_room = format_check["room"]
+                    predicted_room = format_check.get("room", "Unknown")
                     
                     # Verify action is valid
                     if action in valid_actions:
@@ -459,6 +460,7 @@ Your response:"""
                             self.action_room_history.append((current_room, action))
                         
                         # Track format success in true_state
+                        # Note: format_check_passed is now based only on command tags
                         self.true_state.update({
                             'format_check_passed': True,
                             'format_failures': format_failures,
@@ -482,8 +484,6 @@ Your response:"""
                             print(f"DEBUG - Action '{action}' not in valid actions")
                         format_failures += 1
                 else:
-                    if not self.training_mode:
-                        print(f"DEBUG - Format check failed: {format_check}")
                     format_failures += 1
                     
                     # Try fallback extraction methods
@@ -702,7 +702,8 @@ Your response:"""
         
         # Check format
         format_check_result = self.check_format(completion)
-        format_check_passed = format_check_result["has_command_tags"] and format_check_result["has_room_tags"]
+        # Modified: Consider format check passed if command tags are present, room tags are optional
+        format_check_passed = format_check_result["has_command_tags"]
         
         # Get command directly from format check result
         command = format_check_result["command"]

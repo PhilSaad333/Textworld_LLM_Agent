@@ -219,7 +219,8 @@ class LLMGameRunner:
             
             # Check format correctness
             format_check = info.get("format_check", {})
-            format_check_passed = format_check.get("has_command_tags", False) and format_check.get("has_room_tags", False)
+            # Modified: Consider format check passed if command tags are present, room tags are optional
+            format_check_passed = format_check.get("has_command_tags", False)
             
             if format_check.get("has_command_tags", False):
                 self.statistics["command_tag_usage"] += 1
