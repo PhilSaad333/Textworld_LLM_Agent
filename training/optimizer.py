@@ -565,12 +565,12 @@ class MyGRPOOptimizer:
         output_ids = output_tokens.input_ids[0]
         
         # Debug info
-        print(f"Output sequence length: {len(output_ids)}")
-        print(f"First few output tokens: {output_ids[:5]}")
+        #print(f"Output sequence length: {len(output_ids)}")
+        #print(f"First few output tokens: {output_ids[:5]}")
         
         # Check if we're using an encoder-decoder model (like T5) or a decoder-only model (like GPT)
         is_encoder_decoder = getattr(model.config, "is_encoder_decoder", False)  # Default to False
-        print(f"is_encoder_decoder: {is_encoder_decoder}")
+        #print(f"is_encoder_decoder: {is_encoder_decoder}")
         
         # For T5 and other encoder-decoder models, we'll use the built-in loss calculation
         if is_encoder_decoder:
@@ -594,7 +594,7 @@ class MyGRPOOptimizer:
             
             # Convert to log probability (negate since loss is negative log prob)
             log_prob = -loss.unsqueeze(0)
-            print(f"Computed encoder-decoder logprob: {log_prob.item()}")
+            #print(f"Computed encoder-decoder logprob: {log_prob.item()}")
             
             return log_prob
         
