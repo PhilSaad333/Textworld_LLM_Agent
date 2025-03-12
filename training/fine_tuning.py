@@ -84,7 +84,7 @@ class SFTTrainer:
         
         # Freeze most of the model parameters to reduce memory usage
         # Keep only the last few layers trainable
-        num_layers_to_keep_trainable = 2  # Only train the last 2 layers
+        num_layers_to_keep_trainable = config.unfreeze_last_n_layers 
         
         # Count total parameters before freezing
         total_params = sum(p.numel() for p in self.model.parameters())

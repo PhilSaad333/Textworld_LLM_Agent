@@ -143,15 +143,15 @@ class SFTConfig:
     
     # Layer freezing settings
     freeze_layers: bool = True  # Whether to freeze most layers
-    unfreeze_last_n_layers: int = 2  # Number of layers to unfreeze from the end
+    unfreeze_last_n_layers: int = 3  # Number of layers to unfreeze from the end
     
     # Training hyperparameters
-    learning_rate: float = 3e-5  # Reduced learning rate for larger model
-    batch_size: int = 8  # Reduced batch size for larger model
+    learning_rate: float = 1e-5  # Reduced from 3e-5
+    batch_size: int = 4  # Reduced from 8
     num_epochs: int = 1  # We'll run multiple epochs manually with tag checking
-    warmup_steps: int = 100
+    warmup_steps: int = 200  # Increased from 100
     weight_decay: float = 0.01
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5  # Reduced from 1.0
     
     # Sequence lengths
     max_input_length: int = 512
@@ -162,8 +162,8 @@ class SFTConfig:
     scheduler_type: str = "linear"  # linear warmup with decay
     
     # Training features
-    gradient_accumulation_steps: int = 4  # Increased for larger model
-    mixed_precision: bool = True  # Enabled for memory efficiency
+    gradient_accumulation_steps: int = 8  # Increased from 4
+    mixed_precision: bool = False  # Disabled to prevent numerical instability
     
     # Validation
     validation_split: float = 0.1  # 10% of data for validation
