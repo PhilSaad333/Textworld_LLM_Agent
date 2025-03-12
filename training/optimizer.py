@@ -172,6 +172,10 @@ class MyGRPOOptimizer:
         """
         print("Optimizing policy using GRPO...")
         
+        # Make sure model is in training mode
+        agent.model.train()
+        agent.model.to(self.device)
+        
         # Compute advantages for all trajectories
         step_advantages = self.compute_advantages(steps_data)
         
@@ -217,10 +221,6 @@ class MyGRPOOptimizer:
             "advantage_max": []
         }
         
-        # Make sure model is in training mode
-        agent.model.train()
-        agent.model.to(self.device)
-        
         # Training loop
         for epoch in range(self.num_epochs):
             epoch_loss = 0.0
@@ -235,6 +235,9 @@ class MyGRPOOptimizer:
 
             # At the beginning of each epoch, compute old logprobs for all prompts
             print(f"Computing old logprobs for epoch {epoch+1}...")
+            
+            # Temporarily set model to eval mode for consistent old_logprobs
+            agent.model.eval()
             with torch.no_grad():  # Explicitly use no_grad for the entire block
                 for batch_idx, batch in enumerate(tqdm(batches, desc=f"Computing old logprobs")):
                     for prompt_data in batch:
@@ -275,7 +278,9 @@ class MyGRPOOptimizer:
                     if batch_idx % 10 == 0:
                         print(f"  Computed old logprobs for {batch_idx}/{len(batches)} batches")
 
-
+            # Set model back to train mode for the training loop
+            agent.model.train()
+            
             for batch_idx, batch in enumerate(tqdm(batches, desc=f"Epoch {epoch+1}")):
                 batch_loss = 0.0
                 batch_ppo_loss = 0.0
