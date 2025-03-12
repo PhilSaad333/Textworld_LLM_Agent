@@ -94,19 +94,23 @@ class Rollout:
                 "command": None
             }
         
-        # Extract room prediction (this part is not in the agent's method)
-        room_prediction = None
+        # Get format check result directly from agent
         try:
             format_check_result = self.agent.check_format(completion)
             # Store the full format check result for more detailed reward calculation
             self.format_check_result = format_check_result
             
-            if format_check_result["has_room_tags"]:
-                room_match = re.search(r'<room>(.*?)</room>', completion, re.DOTALL)
-                if room_match:
-                    room_prediction = room_match.group(1).strip()
+            # Extract room prediction directly from format check result
+            room_prediction = format_check_result["room"]
         except Exception as e:
             print(f"Error extracting room prediction: {e}")
+            room_prediction = None
+            self.format_check_result = {
+                "has_command_tags": False,
+                "has_room_tags": False,
+                "command": None,
+                "room": None
+            }
         
         # Add room prediction to the action info
         action_info["room_prediction"] = room_prediction
@@ -299,27 +303,23 @@ class Rollout:
         total_reward = self.reward  # Base reward from the environment
         
         # Format penalty - only apply for missing command or room tags
-        if hasattr(self, 'format_check_passed') and not self.format_check_passed:
-            # Check if we have more detailed format information
-            if hasattr(self, 'format_check_result'):
-                format_penalty = 0.0
-                
-                # Apply partial penalties based on what's missing
-                if not self.format_check_result.get("has_command_tags", False):
-                    format_penalty += config.format_penalty / 2
-                
-                if not self.format_check_result.get("has_room_tags", False):
-                    format_penalty += config.format_penalty / 2
-                    
-                total_reward += format_penalty
-            else:
-                # If we don't have detailed info, apply full penalty
-                total_reward += config.format_penalty
+        if hasattr(self, 'format_check_result'):
+            format_check_result = self.format_check_result
+            
+            # Apply partial penalties based on what's missing
+            if not format_check_result.get("has_command_tags", False):
+                total_reward += config.format_penalty / 2
+            
+            if not format_check_result.get("has_room_tags", False):
+                total_reward += config.format_penalty / 2
+        elif hasattr(self, 'format_check_passed') and not self.format_check_passed:
+            # Fallback if we don't have detailed format check result
+            total_reward += config.format_penalty
         
         # Room prediction penalty - apply if prediction is incorrect or missing
         if hasattr(config, 'room_prediction_penalty') and config.room_prediction_penalty < 0:
             # If room prediction is None (missing tags) or explicitly incorrect, apply penalty
-            if (hasattr(self, 'predicted_room') and self.predicted_room is None) or \
+            if (hasattr(self, 'format_check_result') and not self.format_check_result.get("has_room_tags", False)) or \
                (hasattr(self, 'room_prediction_correct') and (self.room_prediction_correct is False)):
                 total_reward += config.room_prediction_penalty
         

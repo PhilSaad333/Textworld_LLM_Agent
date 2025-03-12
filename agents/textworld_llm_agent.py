@@ -704,12 +704,8 @@ Your response:"""
         format_check_result = self.check_format(completion)
         format_check_passed = format_check_result["has_command_tags"] and format_check_result["has_room_tags"]
         
-        # Extract command
-        command = None
-        if format_check_result["has_command_tags"]:
-            command_match = re.search(r'<command>(.*?)</command>', completion, re.DOTALL)
-            if command_match:
-                command = command_match.group(1).strip()
+        # Get command directly from format check result
+        command = format_check_result["command"]
         
         # Find the closest valid action if needed
         action = None
@@ -818,51 +814,60 @@ Your response:"""
 
     def check_format(self, text):
         """
-        Check if the text follows the expected format with command and room tags.
+        Check if the text follows the expected format with properly formatted command and room tags.
+        Ensures that tags are properly nested and don't contain other special tags.
         
         Args:
             text: Text to check
             
         Returns:
             dict: Format check results including:
-                - has_command_tags: Whether text has <command> tags
-                - has_room_tags: Whether text has <room> tags
-                - command: Extracted command (or "None" if not found)
-                - room: Extracted room (or "None" if not found)
+                - has_command_tags: Whether text has properly formatted <command> tags
+                - has_room_tags: Whether text has properly formatted <room> tags
+                - command: Extracted command (or None if not found)
+                - room: Extracted room (or None if not found)
         """
         if text is None:
             return {
-                "format_correct": False,
                 "has_command_tags": False,
                 "has_room_tags": False,
-                "command": "None",
-                "room": "None"
+                "command": None,
+                "room": None
             }
         
-        # Check for A/B/C format (not strict about line starts)
-        has_section_a = bool(re.search(r'A\)', text, re.IGNORECASE))
-        has_section_b = bool(re.search(r'B\)', text, re.IGNORECASE))
-        has_section_c = bool(re.search(r'C\)', text, re.IGNORECASE))
+        # Check for command tags and extract content
+        command = None
+        has_command_tags = False
+        command_matches = re.finditer(r'<command>(.*?)</command>', text, re.DOTALL)
         
-        # Check for command and room tags
-        has_command_tags = '<command>' in text and '</command>' in text
-        has_room_tags = '<room>' in text and '</room>' in text
+        for match in command_matches:
+            command_text = match.group(1).strip()
+            # Check if the command contains any other tags
+            if '<command>' in command_text or '</command>' in command_text or '<room>' in command_text or '</room>' in command_text:
+                continue  # Skip this match as it contains nested tags
+            
+            if command_text:  # Only accept non-empty commands
+                command = command_text
+                has_command_tags = True
+                break  # Use the first valid command
         
-        # Extract command and room, handling the extra spaces
-        command = "None"
-        if has_command_tags:
-            command_match = re.search(r"<command>\s*(.+?)\s*</command>", text)
-            if command_match:
-                command = command_match.group(1).strip()
+        # Check for room tags and extract content
+        room = None
+        has_room_tags = False
+        room_matches = re.finditer(r'<room>(.*?)</room>', text, re.DOTALL)
         
-        room = "None"
-        if has_room_tags:
-            room_match = re.search(r"<room>\s*(.+?)\s*</room>", text)
-            if room_match:
-                room = room_match.group(1).strip()
+        for match in room_matches:
+            room_text = match.group(1).strip()
+            # Check if the room contains any other tags
+            if '<command>' in room_text or '</command>' in room_text or '<room>' in room_text or '</room>' in room_text:
+                continue  # Skip this match as it contains nested tags
+            
+            if room_text:  # Only accept non-empty rooms
+                room = room_text
+                has_room_tags = True
+                break  # Use the first valid room
         
         return {
-            "format_correct": has_section_a and has_section_b and has_section_c,
             "has_command_tags": has_command_tags,
             "has_room_tags": has_room_tags,
             "command": command,
