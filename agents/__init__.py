@@ -1,2 +1,2 @@
 from .textworld_llm_agent import TextWorldLLMAgent
-from .llm_game_runner import GameRunner
+from .llm_game_runner import LLMGameRunner
