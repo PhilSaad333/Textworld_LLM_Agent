@@ -323,17 +323,21 @@ class SFTTrainer:
             
             return model_inputs
 
-    def train(self, train_dataset, val_dataset=None):
+    def train(self, train_dataset, val_dataset=None, use_huggingface_trainer=False):
         """
         Train the model on the given dataset
         
         Args:
             train_dataset: Training dataset
             val_dataset: Optional validation dataset
+            use_huggingface_trainer: If True, use Hugging Face's SFTTrainer from TRL
             
         Returns:
             dict: Training results
         """
+        if use_huggingface_trainer:
+            return self.train_with_huggingface_sft(train_dataset, val_dataset)
+            
         print(f"Starting training with {len(train_dataset)} examples")
         
         # Prepare training
@@ -418,6 +422,9 @@ class SFTTrainer:
             metrics=train_metrics,
             filename="final_model.pt"
         )
+        
+        # Also save just the model state dict for compatibility with TextWorldRLTrainer
+        self.save_model_only(os.path.join(self.config.checkpoint_dir, "final_model_state_dict.pt"))
         
         # Finish W&B run if enabled
         if self.use_wandb and WANDB_AVAILABLE:
@@ -621,8 +628,19 @@ class SFTTrainer:
         # Create checkpoint path
         checkpoint_path = os.path.join(self.config.checkpoint_dir, filename)
         
-        # Create checkpoint
-        checkpoint = {
+        # Save just the model state dict for compatibility with TextWorldRLTrainer
+        torch.save(self.model.state_dict(), checkpoint_path)
+        print(f"Model state dict saved to {checkpoint_path}")
+        
+        # Save tokenizer
+        if "best_model" in filename or "final_model" in filename:
+            tokenizer_path = os.path.join(self.config.checkpoint_dir, "tokenizer")
+            self.tokenizer.save_pretrained(tokenizer_path)
+            print(f"Tokenizer saved to {tokenizer_path}")
+            
+        # Also save a full checkpoint with optimizer state for resuming training if needed
+        full_checkpoint_path = os.path.join(self.config.checkpoint_dir, f"full_{filename}")
+        full_checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -632,16 +650,27 @@ class SFTTrainer:
             'global_step': self.global_step,
             'is_autoregressive': self.is_autoregressive
         }
+        torch.save(full_checkpoint, full_checkpoint_path)
+        print(f"Full checkpoint saved to {full_checkpoint_path}")
+    
+    def save_model_only(self, path):
+        """
+        Save only the model state dict to the specified path
         
-        # Save checkpoint
-        torch.save(checkpoint, checkpoint_path)
-        print(f"Checkpoint saved to {checkpoint_path}")
+        Args:
+            path: Path to save the model state dict
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         
-        # Save tokenizer
-        if "best_model" in filename or "final_model" in filename:
-            tokenizer_path = os.path.join(self.config.checkpoint_dir, "tokenizer")
-            self.tokenizer.save_pretrained(tokenizer_path)
-            print(f"Tokenizer saved to {tokenizer_path}")
+        # Save just the model state dict
+        torch.save(self.model.state_dict(), path)
+        print(f"Model state dict saved to {path}")
+        
+        # Save tokenizer alongside the model
+        tokenizer_path = os.path.join(os.path.dirname(path), "tokenizer")
+        self.tokenizer.save_pretrained(tokenizer_path)
+        print(f"Tokenizer saved to {tokenizer_path}")
     
     def load_checkpoint(self, checkpoint_path):
         """
@@ -764,6 +793,63 @@ class SFTTrainer:
             samples.append([raw_inputs[i], decoded_preds[i], raw_targets[i]])
         
         return samples
+
+    def train_with_huggingface_sft(self, train_dataset, val_dataset=None):
+        """
+        Train the model using Hugging Face's SFTTrainer from the TRL library
+        
+        Args:
+            train_dataset: Training dataset
+            val_dataset: Optional validation dataset
+            
+        Returns:
+            dict: Training results
+        """
+        try:
+            from trl import SFTTrainer, SFTConfig
+        except ImportError:
+            raise ImportError(
+                "To use Hugging Face's SFTTrainer, you need to install the TRL library. "
+                "You can install it with `pip install trl`."
+            )
+        
+        print(f"Starting training with Hugging Face's SFTTrainer with {len(train_dataset)} examples")
+        
+        # Convert config to SFTConfig
+        sft_config = SFTConfig(
+            learning_rate=self.config.learning_rate,
+            num_train_epochs=self.config.num_epochs,
+            per_device_train_batch_size=self.config.batch_size,
+            gradient_accumulation_steps=self.config.gradient_accumulation_steps if hasattr(self.config, 'gradient_accumulation_steps') else 1,
+            max_grad_norm=self.config.max_grad_norm if hasattr(self.config, 'max_grad_norm') else 1.0,
+            optim=self.config.optimizer if hasattr(self.config, 'optimizer') else "adamw_torch",
+            output_dir=self.config.checkpoint_dir,
+            max_seq_length=self.config.max_input_length if hasattr(self.config, 'max_input_length') else 512,
+            save_strategy="epoch",
+            logging_steps=100,
+            remove_unused_columns=False,  # Important for custom datasets
+        )
+        
+        # Initialize SFTTrainer
+        trainer = SFTTrainer(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            args=sft_config,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
+            dataset_text_field="text" if hasattr(train_dataset, "features") and "text" in train_dataset.features else None,
+        )
+        
+        # Train the model
+        train_results = trainer.train()
+        
+        # Save the final model
+        trainer.save_model(os.path.join(self.config.checkpoint_dir, "final_model"))
+        
+        # Save the model state dict for compatibility with TextWorldRLTrainer
+        self.save_model_only(os.path.join(self.config.checkpoint_dir, "final_model_state_dict.pt"))
+        
+        return train_results
 
 class CombinedSFTDataset(Dataset):
     def __init__(self, file_path):

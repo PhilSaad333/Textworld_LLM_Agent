@@ -542,6 +542,11 @@ class MyGRPOOptimizer:
             'model_state_dict': agent.model.state_dict(),
             'metrics': metrics
         }, path)
+        
+        # Save tokenizer alongside the model
+        tokenizer_path = os.path.join(os.path.dirname(path), "tokenizer")
+        agent.tokenizer.save_pretrained(tokenizer_path)
+        print(f"Tokenizer saved to {tokenizer_path}")
     
     def _compute_logprobs(self, model, inputs, output_tokens, batch_idx=0, with_grad=False):
         """
