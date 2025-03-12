@@ -1,1 +1,1 @@
-from .alphazero_config import AlphaZeroConfig
+from .config import *
