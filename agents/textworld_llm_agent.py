@@ -397,11 +397,6 @@ Your response:"""
                     top_k=self.config.eval_config.top_k if has_eval_config else 50
                 )
                 
-                # DEBUG: Print all completions to see if they contain command tags
-                print("\n=== DEBUG: Raw Completions ===")
-                for i, completion in enumerate(completions):
-                    print(f"Completion {i+1}:\n{completion}\n")
-                
                 # Print completions if requested in eval_config
                 if has_eval_config and self.config.eval_config.print_completions:
                     print("\n=== Generated Completions ===")
@@ -841,33 +836,20 @@ Your response:"""
                 "room": None
             }
         
-        # DEBUG: Print the text being checked
-        print("\n=== DEBUG: Text being checked for format ===")
-        print(text)
-        print("\n=== DEBUG: Checking for command tags ===")
-        
         # Check for command tags and extract content
         command = None
         has_command_tags = False
         command_matches = re.finditer(r'<command>(.*?)</command>', text, re.DOTALL)
         
-        # DEBUG: Convert iterator to list to see all matches
-        command_matches_list = list(command_matches)
-        print(f"Found {len(command_matches_list)} command tag matches")
-        
-        for i, match in enumerate(command_matches_list):
+        for match in command_matches:
             command_text = match.group(1).strip()
-            print(f"Match {i+1}: '{command_text}'")
-            
             # Check if the command contains any other tags
             if '<command>' in command_text or '</command>' in command_text or '<room>' in command_text or '</room>' in command_text:
-                print(f"Skipping match {i+1} as it contains nested tags")
                 continue  # Skip this match as it contains nested tags
             
             if command_text:  # Only accept non-empty commands
                 command = command_text
                 has_command_tags = True
-                print(f"Using match {i+1} as the command: '{command}'")
                 break  # Use the first valid command
         
         # Check for room tags and extract content
@@ -875,40 +857,23 @@ Your response:"""
         has_room_tags = False
         room_matches = re.finditer(r'<room>(.*?)</room>', text, re.DOTALL)
         
-        # DEBUG: Convert iterator to list to see all matches
-        room_matches_list = list(room_matches)
-        print(f"\n=== DEBUG: Checking for room tags ===")
-        print(f"Found {len(room_matches_list)} room tag matches")
-        
-        for i, match in enumerate(room_matches_list):
+        for match in room_matches:
             room_text = match.group(1).strip()
-            print(f"Match {i+1}: '{room_text}'")
-            
             # Check if the room contains any other tags
             if '<command>' in room_text or '</command>' in room_text or '<room>' in room_text or '</room>' in room_text:
-                print(f"Skipping match {i+1} as it contains nested tags")
                 continue  # Skip this match as it contains nested tags
             
             if room_text:  # Only accept non-empty rooms
                 room = room_text
                 has_room_tags = True
-                print(f"Using match {i+1} as the room: '{room}'")
                 break  # Use the first valid room
         
-        result = {
+        return {
             "has_command_tags": has_command_tags,
             "has_room_tags": has_room_tags,
             "command": command,
             "room": room
         }
-        
-        print(f"\n=== DEBUG: Format check result ===")
-        print(f"has_command_tags: {has_command_tags}")
-        print(f"has_room_tags: {has_room_tags}")
-        print(f"command: {command}")
-        print(f"room: {room}")
-        
-        return result
 
     def train(self, use_saved_data=False, data_path=None, save_model_path=None):
         """Train the model using GRPO"""
