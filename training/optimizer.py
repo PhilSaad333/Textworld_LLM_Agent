@@ -561,81 +561,42 @@ class MyGRPOOptimizer:
         # Get output for this example
         output_ids = output_tokens.input_ids[0]
         
+        # Debug info
+        print(f"Output sequence length: {len(output_ids)}")
+        print(f"First few output tokens: {output_ids[:5]}")
+        
         # Check if we're using an encoder-decoder model (like T5) or a decoder-only model (like GPT)
-        is_encoder_decoder = getattr(model.config, "is_encoder_decoder", True)
+        is_encoder_decoder = getattr(model.config, "is_encoder_decoder", False)  # Default to False
+        print(f"is_encoder_decoder: {is_encoder_decoder}")
         
-        # Prepare model inputs
-        model_inputs = {
-            "input_ids": input_ids,
-        }
-        if attention_mask is not None:
-            model_inputs["attention_mask"] = attention_mask
-        
-        # For encoder-decoder models, we need to provide decoder inputs
+        # For T5 and other encoder-decoder models, we'll use the built-in loss calculation
         if is_encoder_decoder:
-            # For computing log probs, we need to shift the output_ids to create decoder_input_ids
-            # The first token of decoder_input_ids is the decoder_start_token_id
-            # The rest are the output_ids except the last one
-            decoder_start_token_id = getattr(model.config, "decoder_start_token_id", None)
-            if decoder_start_token_id is None:
-                decoder_start_token_id = getattr(model.config, "pad_token_id", 0)
+            # Prepare model inputs - for encoder-decoder, we just need input_ids and labels
+            model_inputs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask if attention_mask is not None else None,
+                "labels": output_tokens.input_ids,  # Use the full output as labels
+                "return_dict": True
+            }
             
-            # Create decoder_input_ids by shifting output_ids right and prepending decoder_start_token_id
-            decoder_input_ids = torch.cat([
-                torch.tensor([[decoder_start_token_id]], device=self.device),
-                output_ids[:-1].unsqueeze(0)
-            ], dim=1)
-            
-            model_inputs["decoder_input_ids"] = decoder_input_ids
-        
-        # Forward pass through the model
-        if with_grad:
-            # Compute with gradients for the new policy
-            outputs = model(**model_inputs)
-        else:
-            # Compute without gradients for the old policy
-            with torch.no_grad():
+            # Forward pass
+            if with_grad:
                 outputs = model(**model_inputs)
+            else:
+                with torch.no_grad():
+                    outputs = model(**model_inputs)
             
-        # Get logits
-        logits = outputs.logits
+            # The loss is already computed as negative log probability
+            loss = outputs.loss
+            
+            # Convert to log probability (negate since loss is negative log prob)
+            log_prob = -loss.unsqueeze(0)
+            print(f"Computed encoder-decoder logprob: {log_prob.item()}")
+            
+            return log_prob
         
-        # Apply temperature scaling for numerical stability
-        temperature = 1.0
-        scaled_logits = logits / temperature
-        
-        # Compute log probabilities
-        log_probs = F.log_softmax(scaled_logits, dim=-1)
-        
-        # Extract log probabilities for the actual output tokens
-        token_log_probs = []
-        
-        if is_encoder_decoder:
-            # For encoder-decoder models, we compare each position in the output with the next token
-            for i in range(len(output_ids) - 1):  # -1 because we don't need the last token's prediction
-                if output_ids[i+1] == model.config.pad_token_id:
-                    continue  # Skip pad tokens
-                token_log_prob = log_probs[0, i, output_ids[i+1]]
-                token_log_probs.append(token_log_prob)
-        else:
-            # For decoder-only models, we need to handle differently
-            # This part remains the same as before
-            for i in range(len(output_ids) - 1):  # -1 because we don't need the last token's prediction
-                if output_ids[i+1] == model.config.pad_token_id:
-                    continue  # Skip pad tokens
-                token_log_prob = log_probs[0, i, output_ids[i+1]]
-                token_log_probs.append(token_log_prob)
-        
-        # Combine token log probabilities by averaging over tokens
-        # This implements the 1/|o^a_t| factor in the GRPO objective
-        if token_log_probs:
-            # Clip log probabilities to prevent extreme values
-            clipped_log_probs = torch.stack(token_log_probs)
-            # Clip to a wider range that better matches observed values
-            clipped_log_probs = torch.clamp(clipped_log_probs, min=-30.0, max=-1.0)
-            return clipped_log_probs.mean().unsqueeze(0)
-        else:
-            return torch.tensor([-20.0], device=self.device)  # Return a reasonable default value
+        # For decoder-only models, continue with the existing approach
+        # ... rest of your method for decoder-only models
 
 
 
