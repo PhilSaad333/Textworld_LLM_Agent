@@ -309,8 +309,8 @@ class MyGRPOOptimizer:
                     old_logprobs_list = prompt_data["old_logprobs"]
                     old_logprobs = torch.cat(old_logprobs_list, dim=0)
                     
-                    # Compute new log probabilities and policy loss
-                    optimizer.zero_grad()
+                    # IMPORTANT: Temporarily set model to eval mode for new logprobs too!
+                    agent.model.eval()  # Set to eval mode for consistent computation
                     
                     new_logprobs_list = []
                     for output in outputs:
@@ -323,9 +323,12 @@ class MyGRPOOptimizer:
                             return_tensors="pt"
                         ).to(self.device)
                         
-                        # Get log probabilities for the output (with gradients)
+                        # Get log probabilities with gradients but in eval mode
                         new_logprobs = self._compute_logprobs(agent.model, input_tokens, output_tokens, 0, with_grad=True)
                         new_logprobs_list.append(new_logprobs)
+                    
+                    # Set back to train mode after computing logprobs
+                    agent.model.train()
                     
                     # Combine new log probabilities
                     new_logprobs = torch.cat(new_logprobs_list, dim=0)
@@ -595,8 +598,8 @@ class MyGRPOOptimizer:
             
             return log_prob
         
-        # For decoder-only models, continue with the existing approach
-        # ... rest of your method for decoder-only models
+        # For decoder-only models, unimplemented rn
+        raise NotImplementedError("Decoder-only models are not supported yet")
 
 
 
