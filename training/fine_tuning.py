@@ -67,7 +67,7 @@ class SFTTrainer:
         
         # Add special tokens for command and room tags
         special_tokens = {
-            'additional_special_tokens': ['<command>', '</command>', '<room>', '</room>']
+            'additional_special_tokens': ['<tag>']
         }
         
         # Add pad token if it doesn't exist (for some autoregressive models)

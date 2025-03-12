@@ -143,7 +143,7 @@ class SFTConfig:
     
     # Layer freezing settings
     freeze_layers: bool = True  # Whether to freeze most layers
-    unfreeze_last_n_layers: int = 3  # Number of layers to unfreeze from the end
+    unfreeze_last_n_layers: int = 4  # Number of layers to unfreeze from the end
     
     # Training hyperparameters
     learning_rate: float = 1e-5  # Reduced from 3e-5
