@@ -329,6 +329,33 @@ class TextWorldLLMAgent:
         base_prompt = f"""You are playing a text adventure game. Analyze this game state and give a response formatted as requested:
 
 Game State:
+Goal: = {self.goal if self.goal else "Unknown"}
+Location: {room}
+Observation: {clean_obs}
+Previous actions:
+{history_str}
+Currently available actions: {filtered_actions}
+
+Generate a *concise* response in the following format:
+
+A) One sentence reasoning about the game state, which actions seem relevant, and what those actions might achieve. Remember that you might need to explore different rooms to achieve your goal.
+
+B) Then, state your chosen action - Make sure it is in the available actions list:
+Therefore, I choose: <tag>[exact action]<tag>
+
+C) Then, state your prediction for the room you will be in after taking this action (say "New Room" if you think it will be a room you haven't been in yet):
+I predict that I will be in room: <tag>[room name]<tag>
+
+Your response:"""
+
+
+
+        # Later we want to improve the prompt to include the inventory and map
+
+
+        base_prompt_improved = f"""You are playing a text adventure game. Analyze this game state and give a response formatted as requested:
+
+Game State:
 Goal: {self.goal if self.goal else "Unknown"}
 Location: {room}
 Observation: {clean_obs}
