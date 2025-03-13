@@ -867,5 +867,102 @@ class CombinedSFTDataset(Dataset):
             "output": example["output"]
         }
 
+def edit_sft_trainer_init():
+    from training.fine_tuning import SFTTrainer
+    
+    # Store the original __init__ method
+    original_init = SFTTrainer.__init__
+    
+    # Define the new __init__ method
+    def new_init(self, config):
+        """
+        Initialize SFT Trainer with support for both old and new tag formats
+        """
+        # Call the original __init__ but intercept before it adds special tokens
+        original_init(self, config)
+        
+        # Remove the tokenizer special tokens added by the original __init__
+        # This is done by getting the original vocabulary size
+        original_vocab_size = len(self.tokenizer)
+        
+        # Add special tokens for both old and new formats
+        special_tokens = {
+            'additional_special_tokens': [
+                '<tag>',  # New format
+                '<command>', '</command>', '<room>', '</room>'  # Old format
+            ]
+        }
+        
+        # Add pad token if it doesn't exist (for some autoregressive models)
+        if self.is_autoregressive and self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            
+        # Add the special tokens
+        num_added_tokens = self.tokenizer.add_special_tokens(special_tokens)
+        
+        # Resize the model's token embeddings to account for the new tokens
+        self.model.resize_token_embeddings(len(self.tokenizer))
+        
+        # Print information about the special tokens
+        print(f"Added {num_added_tokens} special tokens:")
+        for token in special_tokens['additional_special_tokens']:
+            print(f"  - {token}: {self.tokenizer.convert_tokens_to_ids(token)}")
+        
+        # Adjust the number of layers to keep trainable (only last 2)
+        num_layers_to_keep_trainable = 2
+        
+        # Count total parameters before freezing
+        total_params = sum(p.numel() for p in self.model.parameters())
+        
+        # Freeze parameters based on model type
+        if self.is_autoregressive:
+            # For GPT-2 and similar models
+            if hasattr(self.model, 'transformer'):
+                # Freeze embeddings
+                for param in self.model.transformer.wte.parameters():
+                    param.requires_grad = False
+                for param in self.model.transformer.wpe.parameters():
+                    param.requires_grad = False
+                
+                # Freeze most of the layers
+                if hasattr(self.model.transformer, 'h'):
+                    num_layers = len(self.model.transformer.h)
+                    for i, layer in enumerate(self.model.transformer.h):
+                        # Only keep the last few layers trainable
+                        if i < num_layers - num_layers_to_keep_trainable:
+                            for param in layer.parameters():
+                                param.requires_grad = False
+                
+                # Keep LM head trainable
+                if hasattr(self.model, 'lm_head'):
+                    for param in self.model.lm_head.parameters():
+                        param.requires_grad = True
+        else:
+            # For T5 and similar models
+            if hasattr(self.model, 'encoder'):
+                # Freeze encoder
+                for param in self.model.encoder.parameters():
+                    param.requires_grad = False
+                
+                # Freeze most of decoder layers
+                if hasattr(self.model.decoder, 'block'):
+                    num_layers = len(self.model.decoder.block)
+                    for i, layer in enumerate(self.model.decoder.block):
+                        # Only keep the last 2 layers trainable
+                        if i < num_layers - num_layers_to_keep_trainable:
+                            for param in layer.parameters():
+                                param.requires_grad = False
+        
+        # Count trainable parameters after freezing
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,} ({trainable_params/total_params:.1%} of total)")
+        print(f"Only the last {num_layers_to_keep_trainable} layers are trainable")
+    
+    # Replace the original __init__ with our new one
+    SFTTrainer.__init__ = new_init
+    
+    return "SFTTrainer.__init__ has been modified to support both old and new tag formats"
+
 
 
